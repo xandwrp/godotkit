@@ -3,25 +3,7 @@
 
 #[test]
 #[ignore = "scaffold"]
-fn status_reports_presence_and_sizes_without_creating_anything() {
-    todo!()
-}
-
-#[test]
-#[ignore = "scaffold"]
-fn clean_targets_are_a_closed_list_and_never_follow_symlinks_or_reparse_points() {
-    todo!()
-}
-
-#[test]
-#[ignore = "scaffold"]
-fn clean_dry_run_lists_without_removing() {
-    todo!()
-}
-
-#[test]
-#[ignore = "scaffold"]
-fn clean_refuses_while_a_session_is_running() {
+fn refresh_takes_the_lock_and_records_diagnostics() {
     todo!()
 }
 

@@ -54,3 +54,15 @@ fn has_errors_is_true_for_zero_exit_script_errors() {
 fn unresolved_uid_is_extracted_from_message() {
     todo!()
 }
+
+#[test]
+#[ignore = "scaffold"]
+fn identity_ignores_line_and_occurrences_but_keeps_message_and_resource() {
+    todo!()
+}
+
+#[test]
+#[ignore = "scaffold"]
+fn suggestions_for_nonexistent_function_come_from_the_api_index() {
+    todo!()
+}

@@ -1,28 +1,25 @@
 //! Process supervision. The only module allowed to spawn, poll, or kill.
 //!
-//! Identity is `(pid, start_time)`; a bare pid is never trusted across calls.
-//! Every long-lived child is spawned in its own process group (Unix) or job
-//! object (Windows) so `terminate` takes descendants with it.
+//! Nothing here outlives the calling gdkit process: every child is owned by a
+//! [`ChildGuard`] that kills the whole tree on drop. That removes pid bookkeeping,
+//! start-time identity, and cross-invocation liveness entirely.
 //!
-//! Platform support is explicit: Linux, macOS, Windows. Anything else fails to
-//! compile rather than silently degrading.
+//! Every child is spawned in its own process group (Unix) or job object (Windows)
+//! so termination is transitive. Platform support is explicit: Linux, macOS,
+//! Windows. Anything else fails to compile rather than silently degrading.
 //!
-//! # Tests (tests/process.rs, all offline, spawn `sleep`/`cmd` as the subject)
+//! # Tests (tests/process.rs, all offline, spawn `sleep`/`sh`/`cmd` as the subject)
 //! - `run_captures_interleaved_stdout_stderr_in_observation_order`
 //! - `run_enforces_deadline_and_reports_timed_out`
 //! - `run_kills_descendants_on_timeout` (sh -c "sleep 30 & wait")
-//! - `identity_detects_pid_reuse_via_start_time`
-//! - `is_alive_is_false_for_zombies_after_reap`
-//! - `terminate_waits_for_exit_and_escalates_to_kill_after_grace`
-//! - `terminate_on_stale_identity_is_a_noop_that_returns_not_found`
-//! - `spawn_detached_survives_parent_exit_and_ignores_sigint` (unix: setsid; windows: new console/job)
-//! - `child_guard_kills_on_drop_unless_released`
+//! - `spawn_streams_output_to_the_log_file_while_running`
+//! - `guard_terminate_waits_for_exit_and_escalates_to_kill_after_grace`
+//! - `guard_drop_kills_the_tree`
+//! - `try_wait_reports_exit_status_without_blocking`
 
 use std::ffi::OsString;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
-
-use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!("gdproject::process supports Linux, macOS, and Windows only");
@@ -33,22 +30,11 @@ pub struct Spawn {
     pub args: Vec<OsString>,
     pub cwd: Option<PathBuf>,
     pub env: Vec<(OsString, OsString)>,
-    /// Isolate in a process group / job so termination is transitive.
-    pub own_group: bool,
-    /// Survive parent exit; no inherited console/tty.
-    pub detached: bool,
 }
 
 impl Spawn {
     pub fn new(program: impl Into<PathBuf>) -> Self {
-        Self {
-            program: program.into(),
-            args: Vec::new(),
-            cwd: None,
-            env: Vec::new(),
-            own_group: true,
-            detached: false,
-        }
+        Self { program: program.into(), args: Vec::new(), cwd: None, env: Vec::new() }
     }
     pub fn arg(mut self, arg: impl Into<OsString>) -> Self {
         self.args.push(arg.into());
@@ -58,22 +44,9 @@ impl Spawn {
         self.args.extend(args.into_iter().map(Into::into));
         self
     }
-}
-
-/// `(pid, start time)` so a reused pid is never mistaken for our process.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessId {
-    pub pid: u32,
-    /// Platform-specific start stamp (jiffies on Linux, FILETIME on Windows, kinfo on macOS).
-    pub started: u64,
-}
-
-impl ProcessId {
-    pub fn of_running(pid: u32) -> std::io::Result<Self> {
-        todo!()
-    }
-    pub fn is_alive(&self) -> bool {
-        todo!()
+    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
     }
 }
 
@@ -99,7 +72,7 @@ impl OutputLine {
 
 #[derive(Debug)]
 pub struct Captured {
-    pub id: ProcessId,
+    pub pid: u32,
     pub status: Option<std::process::ExitStatus>,
     pub timed_out: bool,
     pub lines: Vec<OutputLine>,
@@ -127,36 +100,15 @@ pub fn run(spawn: &Spawn, deadline: Duration) -> std::io::Result<Captured> {
     todo!()
 }
 
-/// Spawns without waiting. The returned guard kills the tree on drop unless released.
-pub fn spawn(spawn: &Spawn, log: Option<&std::path::Path>) -> std::io::Result<ChildGuard> {
+/// Spawns without waiting; both streams are appended to `log` as they arrive.
+/// The guard kills the tree on drop.
+pub fn spawn(spawn: &Spawn, log: &Path) -> std::io::Result<ChildGuard> {
     todo!()
 }
 
 pub struct ChildGuard {
-    id: ProcessId,
-    released: bool,
-    spawned_at: Instant,
-    // platform handle / Child
-}
-
-impl ChildGuard {
-    pub fn id(&self) -> ProcessId {
-        self.id
-    }
-    /// Stop supervising: the process outlives this handle (durable sessions).
-    pub fn release(mut self) -> ProcessId {
-        self.released = true;
-        self.id
-    }
-    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        todo!()
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        todo!()
-    }
+    pid: u32,
+    // platform handle / Child / job object
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,16 +117,25 @@ pub enum TerminateOutcome {
     Exited,
     /// Needed the hard kill.
     Killed,
-    /// Identity did not match a live process; nothing done.
-    NotFound,
+    /// Had already exited.
+    AlreadyExited,
 }
 
-/// TERM (or CTRL_BREAK / job close) then KILL after `grace`. Always waits for exit.
-pub fn terminate(id: &ProcessId, grace: Duration) -> std::io::Result<TerminateOutcome> {
-    todo!()
+impl ChildGuard {
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        todo!()
+    }
+    /// TERM (or CTRL_BREAK / job close) then KILL after `grace`. Always waits for exit.
+    pub fn terminate(&mut self, grace: Duration) -> std::io::Result<TerminateOutcome> {
+        todo!()
+    }
 }
 
-/// Immediate hard kill of the tree. Used by `scenario crash`.
-pub fn kill(id: &ProcessId) -> std::io::Result<TerminateOutcome> {
-    todo!()
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        todo!()
+    }
 }

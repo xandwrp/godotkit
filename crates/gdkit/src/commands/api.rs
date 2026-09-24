@@ -1,4 +1,4 @@
-//! `api`: `--dump` → load_native (or standalone) and print the ApiIndex JSON. Otherwise ProjectApi::load then lookup_class / lookup_member / search; a missing class or member is Exit::Failed with suggestions.
+//! `api`: `--dump` → load_native (or standalone) and print the ApiIndex JSON. `search <term>` → search. One arg → lookup_class, falling back to lookup_global (utility function / global enum). Two args → lookup_member. A miss is Exit::Failed with suggestions in the JSON.
 
 use crate::cli::*;
 use crate::context::Context;

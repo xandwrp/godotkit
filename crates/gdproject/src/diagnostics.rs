@@ -10,6 +10,8 @@
 //! - `ignore_rules_match_exact_message_and_own_source_frame_only`
 //! - `has_errors_is_true_for_zero_exit_script_errors`
 //! - `unresolved_uid_is_extracted_from_message`
+//! - `identity_ignores_line_and_occurrences_but_keeps_message_and_resource`
+//! - `suggestions_for_nonexistent_function_come_from_the_api_index`
 
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +68,22 @@ pub struct Diagnostic {
     pub occurrences: u32,
     /// Shutdown leak reports and similar: real, but not about the project's sources.
     pub is_shutdown_noise: bool,
+    /// Stable key for baseline comparison: severity + code + message + resource. Not line.
+    pub identity: String,
+    /// "Did you mean": filled by [`suggest`] when an api index is available.
+    pub suggestions: Vec<String>,
+}
+
+impl Diagnostic {
+    pub fn compute_identity(&self) -> String {
+        todo!()
+    }
+}
+
+/// Fills `suggestions` for messages that name a missing method, property, class,
+/// or node (`Nonexistent function 'x' in base 'Y'`, `Node not found: "A/B"`).
+pub fn suggest(diagnostics: &mut [Diagnostic], api: Option<&gdview::api::ApiIndex>) {
+    todo!()
 }
 
 /// Parses every header line and its frames. Duplicates collapse into `occurrences`.

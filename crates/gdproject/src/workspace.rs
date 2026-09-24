@@ -41,13 +41,7 @@ impl Workspace {
     pub fn api_cache_path(&self) -> PathBuf {
         self.state_dir.join("api-index.json")
     }
-    pub fn sessions_dir(&self) -> PathBuf {
-        self.state_dir.join("sessions")
-    }
-    pub fn scenarios_dir(&self) -> PathBuf {
-        self.state_dir.join("scenarios")
-    }
-    /// Exclusive lock for operations that touch `.godot` (check, cache, import).
+    /// Exclusive lock for operations that write the real `.godot` (cache refresh).
     pub fn lock(&self) -> crate::Result<Lock> {
         todo!()
     }

@@ -1,6 +1,6 @@
 //! The JSON grammar gdkit uses to move Godot Variants in and out of harnesses.
 //! One definition, shared by `resource create` specs, `resource schema` output,
-//! `inspect` checkpoints, and `animation inspect`. The GDScript encoder in
+//! `run` checkpoints. The GDScript encoder in
 //! `gdproject/harness/protocol.gd` must mirror this exactly.
 //!
 //! Grammar (informal):

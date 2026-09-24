@@ -25,19 +25,34 @@ gdkit check --slice scripts/player.gd --output json
 gdkit check --slice scripts/player.gd --slice scenes/player.tscn --output json
 ```
 
+```sh
+gdkit check --static-only --output json            # milliseconds, no engine
+gdkit check --baseline .godot/gdkit/last.json --output json
+```
+
 Without an editor there are no red squiggles. `godot --check-only` parses one
 script and knows nothing about scenes, resources, missing preloads, or a
-`class_name` that moved. `check` imports a disposable copy of the project and
-loads every script, scene, and resource in a fresh process, so it finds what the
-editor would find, and it never touches the source project's `.godot`.
+`class_name` that moved. `check` runs in two layers. First, static
+cross-reference checks with no engine: a scene connection to a method the script
+no longer declares, `$Player/Camera3D` when no owning scene has that node, a
+`preload` or `ExtResource` path that points at nothing, a `uid://` nothing
+resolves. Then it imports a disposable copy of the project and loads every
+script, scene, and resource in a fresh process, so it finds what the editor
+would find, and it never touches the source project's `.godot`.
+
+`--static-only` is the sub-second version for the inner loop. `--baseline`
+diffs against a previous report by diagnostic identity (message and resource,
+not line), so on a project with pre-existing warnings the agent reads
+`baseline.new` and ignores the rest.
 
 What the agent reads from the report:
 
 ```
 outcome                       passed | failed | incomplete
 phases[].id                   which step failed (import, resource_loading, …)
-phases[].diagnostics[]        severity, message, resource, line, column, occurrences
+phases[].diagnostics[]        severity, message, resource, line, column, occurrences, suggestions
 failures[]                    kind + message, one line each, for the summary
+baseline.new[]                only with --baseline: diagnostics this change introduced
 counts                        how much was actually validated
 artifact_dir                  raw engine output when the diagnostic is not enough
 ```
@@ -59,15 +74,20 @@ it as "my change is wrong"; it should read `failures[].kind` and probably rerun.
 ```sh
 gdkit api CharacterBody3D move_and_slide
 gdkit api CharacterBody3D
+gdkit api String split                # builtin Variant classes
+gdkit api lerp                        # utility functions
 gdkit api search multiplayer
 gdkit api WeaponDefinition            # project class_name scripts are included
 gdkit api --dump --output json > .godot/gdkit/api.json
 ```
 
 Agents hallucinate Godot method names, argument orders, and which class a
-method is declared on. `api` asks the engine that will actually run the code,
-including GDExtension classes and the project's own `class_name` scripts, and
-merges them.
+method is declared on. `api` is backed by the engine's own
+`--dump-extension-api-with-docs`, so it covers what ClassDB reflection never
+could: builtin Variant methods (`String.split`, `Array.filter`), utility
+functions (`lerp`, `clamp`, `randf_range`), global enums, singletons, and a
+one-line description for each. The project's `class_name` scripts are merged
+in from source.
 
 The answers that matter:
 
@@ -159,6 +179,21 @@ reports it as typed observations with `unknowns[]` kept explicit rather than
 guessed. `--explain` narrows to one method or node and lists every endpoint,
 call site, and synchronizer that touches it.
 
+## 7. `refs` and `settings`: the lookups that prevent wrong guesses
+
+```sh
+gdkit refs res://scripts/player.gd --output json     # before a rename or move
+gdkit settings input                                 # action names and their keys
+gdkit settings layers                                # named physics/render layers
+gdkit settings main-scene
+gdkit settings get application config/name
+```
+
+Offline, instant. `refs` lists every scene, script, autoload, and `uid://` that
+points at a file, so a move or rename is done with the full list in hand rather
+than discovered by the next `check`. `settings input` is the answer to `"jump"`
+vs `"ui_accept"`; `settings layers` makes collision masks readable.
+
 ## 0. `doctor`: run this first in an unfamiliar repo
 
 ```sh
@@ -171,29 +206,34 @@ which sessions are recorded and whether any record is corrupt. Thirty seconds
 here saves the twenty minutes an agent otherwise spends debugging a wrong
 engine path through a failing `check`.
 
-## What the agent does not reach for
-
-Durable named sessions and scenarios are built for humans watching a game over
-time. An agent works in request/response and does not want a background process
-it must poll and remember to stop. The shape it wants instead:
+## 8. `run`: execute to a checkpoint and stop
 
 ```sh
-gdkit run --scene res://scenes/match.tscn --frames 120 --until /round_state/phase=playing --output json
+gdkit run --scene res://scenes/match.tscn --frames 120 --output json
+gdkit run --until /round_state/phase=playing --timeout 30 --output json
+gdkit run --net -- --server
 ```
 
-Launch, run until N frames or a checkpoint condition, dump checkpoints and the
-log, exit with the verdict. Same runtime probe, same checkpoint adapter, no
-lifecycle to manage. Scenarios are then that shape with three participants and
-a readiness order. This is the direction for `run`; the durable session
-commands are kept for humans but are not on the agent's path.
+Launch the scene headless with the project's autoloads, run until N frames or
+until a checkpoint (from the project's `[run] checkpoint_adapter`) equals a
+value, dump the checkpoints and log, kill the process, exit with the verdict.
+No background process, nothing to remember to stop. The report has `frames`,
+`stopped_by`, `checkpoints`, `diagnostics` from the log, and `log_path`.
+
+There are no durable sessions or scenarios. An agent works request/response;
+a process it has to poll and later stop is a liability, not a feature.
+Multi-participant runs, when a project needs them, are a list of these with a
+readiness order.
 
 ## Implementation priority derived from this page
 
-1. `check` end to end, `--slice` included, JSON report, exit codes.
-2. `api` lookup, search, miss suggestions, `--dump`.
-3. `resource schema` and `resource create` with the verify-by-reload loop.
-4. `scene-tree --expand` (offline, lands early because it is pure gdview).
-5. `check --script`.
-6. `doctor`.
-7. `net` static, then `--explain`.
-8. `run` in the run-to-checkpoint shape.
+1. `check --static-only`: `gdview::xref`, `uid`, `scene`, `declarations`. Pure gdview, lands first.
+2. `check` end to end, `--slice` included, JSON report, exit codes, `--baseline`.
+3. `api` from the extension dump: lookup, globals, search, miss suggestions, `--dump`.
+4. `settings` and `refs` (offline, small, high value per line).
+5. `resource schema` and `resource create` with the verify-by-reload loop.
+6. `scene-tree --expand`.
+7. `check --script`.
+8. `doctor`, `import`.
+9. `net` static, then `--explain`.
+10. `run`.

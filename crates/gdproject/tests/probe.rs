@@ -15,7 +15,7 @@ fn request_times_out_and_reports_connection_refused_distinctly() {
 
 #[test]
 #[ignore = "scaffold"]
-fn network_observation_decodes_peers_authority_and_events() {
+fn status_reports_frames_and_ready() {
     todo!()
 }
 
@@ -27,18 +27,18 @@ fn checkpoints_report_adapter_errors_as_status_not_transport_error() {
 
 #[test]
 #[ignore = "scaffold"]
-fn compare_produces_json_pointer_differences_in_stable_order() {
+fn network_observation_decodes_peers_authority_and_inventory() {
     todo!()
 }
 
 #[test]
 #[ignore = "requires GDKIT_TEST_GODOT"]
-fn real_engine_probe_reports_ready_and_answers_network_query() {
+fn real_engine_probe_reports_ready_and_answers_every_query() {
     todo!()
 }
 
 #[test]
 #[ignore = "requires GDKIT_TEST_GODOT"]
-fn real_engine_script_error_does_not_freeze_the_session() {
+fn real_engine_script_error_does_not_freeze_the_probe() {
     todo!()
 }

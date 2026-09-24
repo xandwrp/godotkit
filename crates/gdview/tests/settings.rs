@@ -1,4 +1,4 @@
-// Acceptance tests for gdview::settings. Bodies land with the implementation.
+// Acceptance tests for gdview::settings. Offline unless prefixed real_engine_.
 #![allow(unused)]
 
 #[test]
@@ -28,6 +28,24 @@ fn autoloads_preserve_declaration_order_and_singleton_marker() {
 #[test]
 #[ignore = "scaffold"]
 fn warnings_reports_defaults_when_keys_absent() {
+    todo!()
+}
+
+#[test]
+#[ignore = "scaffold"]
+fn input_actions_parse_deadzone_and_key_joypad_mouse_events() {
+    todo!()
+}
+
+#[test]
+#[ignore = "scaffold"]
+fn layer_names_cover_2d_3d_render_physics_navigation_and_avoidance() {
+    todo!()
+}
+
+#[test]
+#[ignore = "scaffold"]
+fn window_reports_size_mode_and_stretch_with_godot_defaults() {
     todo!()
 }
 

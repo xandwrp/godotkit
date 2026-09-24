@@ -27,12 +27,6 @@ fn checkpoint_adapter_must_be_res_gd_without_dot_dot() {
 
 #[test]
 #[ignore = "scaffold"]
-fn scenario_configs_validate_roles_ports_and_readiness_pointers() {
-    todo!()
-}
-
-#[test]
-#[ignore = "scaffold"]
 fn select_engine_precedence_is_flag_then_env_then_config() {
     todo!()
 }

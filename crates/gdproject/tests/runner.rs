@@ -39,7 +39,7 @@ fn run_harness_enforces_deadline_and_reports_timeout_with_partial_output() {
 
 #[test]
 #[ignore = "scaffold"]
-fn run_engine_is_the_raw_form_used_for_import_and_scene_smoke() {
+fn run_engine_is_the_raw_form_used_for_import_dump_and_run() {
     todo!()
 }
 

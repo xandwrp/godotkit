@@ -21,7 +21,7 @@ pub enum Output {
     Json,
 }
 
-/// Shared by every engine-backed command.
+/// Shared by every project command.
 #[derive(Debug, Args, Clone)]
 pub struct ProjectArgs {
     #[arg(long, default_value = ".", help = "Project directory or any path inside it")]
@@ -34,38 +34,28 @@ pub struct ProjectArgs {
 pub enum Command {
     /// Associate the project with an engine (writes gdkit.toml).
     Init { #[command(flatten)] project: ProjectArgs },
-    /// Explain the resolved engine, config, caches, and sessions.
+    /// Explain the resolved engine, config, caches, and warning policy.
     Doctor { #[command(flatten)] project: ProjectArgs },
-    /// Import a disposable copy and load every script, scene, and resource.
+    /// Static cross-reference checks, then import a disposable copy and load everything.
     Check(CheckArgs),
-    /// Query the engine's ClassDB and the project's class_name scripts.
+    /// Query the engine API (classes, builtins, utilities) and the project's class_name scripts.
     Api(ApiArgs),
+    /// Everything that references a project file (offline).
+    Refs { #[command(flatten)] project: ProjectArgs, #[arg(value_name = "RES")] path: String },
+    /// Typed views of project.godot (offline).
+    Settings { #[command(flatten)] project: ProjectArgs, #[command(subcommand)] what: SettingsCommand },
     /// Discover schemas and create verified .tres files from JSON.
     Resource { #[command(subcommand)] command: ResourceCommand },
-    /// Offline glTF listing and engine-backed AnimationTree inspection.
-    Animation { #[command(subcommand)] command: AnimationCommand },
-    /// Print a text scene's node tree offline.
+    /// Print a text scene's node tree (offline).
     SceneTree(SceneTreeArgs),
     /// Print autoloads in initialization order (offline).
     Autoloads { #[command(flatten)] project: ProjectArgs },
-    /// Static multiplayer topology report.
+    /// Static multiplayer topology report (offline).
     Net(NetArgs),
-    /// Manage Godot's derived caches under .godot.
-    Cache { #[command(subcommand)] command: CacheCommand },
-    /// Launch a durable named session.
+    /// Refresh Godot's derived caches with a headless editor import.
+    Import { #[command(flatten)] project: ProjectArgs },
+    /// Run a scene to a frame count or checkpoint condition and report.
     Run(RunArgs),
-    /// List sessions.
-    Sessions { #[command(flatten)] project: ProjectArgs, #[arg(long)] all: bool },
-    /// Print a session's log.
-    Logs { #[command(flatten)] project: ProjectArgs, session: String },
-    /// Stop a session.
-    Stop { #[command(flatten)] project: ProjectArgs, session: String },
-    /// Restart a session as a new generation.
-    Restart { #[command(flatten)] project: ProjectArgs, session: String },
-    /// Observe a live session.
-    Inspect(InspectArgs),
-    /// Start and control declared multiplayer scenarios.
-    Scenario { #[command(subcommand)] command: ScenarioCommand },
 }
 
 #[derive(Debug, Args)]
@@ -74,20 +64,18 @@ pub struct CheckArgs {
     pub project: ProjectArgs,
     #[arg(long, value_name = "PATH", help = "Check only these files/dirs (repeatable, project-relative)")]
     pub slice: Vec<PathBuf>,
+    #[arg(long, help = "Static cross-reference checks only; no engine")]
+    pub static_only: bool,
     #[arg(long)]
     pub strict_methods: bool,
     #[arg(long, value_name = "RES", help = "Run this SceneTree script after validation (repeatable)")]
     pub script: Vec<String>,
     #[arg(long, default_value = "30", value_parser = clap::value_parser!(u64).range(1..=3600))]
     pub script_timeout: u64,
-    #[arg(long, value_name = "RES", help = "Smoke-test this scene after validation (repeatable)")]
-    pub scene: Vec<String>,
-    #[arg(long, default_value = "2", value_parser = clap::value_parser!(u32).range(1..))]
-    pub smoke_frames: u32,
-    #[arg(long, default_value = "30", value_parser = clap::value_parser!(u64).range(1..=3600))]
-    pub smoke_timeout: u64,
     #[arg(long, default_value = "600", help = "Seconds allowed for each import/load phase")]
     pub phase_timeout: u64,
+    #[arg(long, value_name = "REPORT.json", help = "Classify diagnostics as new/carried/resolved against this report")]
+    pub baseline: Option<PathBuf>,
     #[arg(long, help = "Print full engine output to stderr")]
     pub verbose: bool,
 }
@@ -96,12 +84,26 @@ pub struct CheckArgs {
 pub struct ApiArgs {
     #[command(flatten)]
     pub project: ProjectArgs,
-    #[arg(value_name = "CLASS|search", required_unless_present = "dump")]
+    #[arg(value_name = "CLASS|FUNCTION|search", required_unless_present = "dump")]
     pub query: Option<String>,
     #[arg(value_name = "MEMBER|TERM")]
     pub member: Option<String>,
     #[arg(long, conflicts_with_all = ["query", "member"], help = "Write the full native index as JSON")]
     pub dump: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SettingsCommand {
+    /// Input actions and their events, including built-in ui_* actions.
+    Input,
+    /// Named 2D/3D render, physics, navigation, and avoidance layers.
+    Layers,
+    /// Window size, mode, and stretch.
+    Window,
+    /// Main scene, resolved from uid when needed.
+    MainScene,
+    /// Raw value of one key: `gdkit settings get application config/name`.
+    Get { section: String, key: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -124,25 +126,6 @@ pub enum ResourceCommand {
     },
 }
 
-#[derive(Debug, Subcommand)]
-pub enum AnimationCommand {
-    /// Offline.
-    List {
-        path: PathBuf,
-        #[arg(long)]
-        names: bool,
-        #[arg(long)]
-        filter: Option<String>,
-    },
-    Inspect {
-        #[command(flatten)]
-        project: ProjectArgs,
-        scene: String,
-        #[arg(long, value_name = "NODE_PATH")]
-        tree: Option<String>,
-    },
-}
-
 #[derive(Debug, Args)]
 pub struct SceneTreeArgs {
     pub path: PathBuf,
@@ -162,52 +145,26 @@ pub struct NetArgs {
     pub project: ProjectArgs,
     #[arg(long, help = "Explain one RPC method, receiver.method, scene, or node")]
     pub explain: Option<String>,
-    #[arg(long, help = "Skip the engine and report from sources only")]
-    pub offline: bool,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum CacheCommand {
-    Status { #[command(flatten)] project: ProjectArgs },
-    Refresh { #[command(flatten)] project: ProjectArgs },
-    Rebuild { #[command(flatten)] project: ProjectArgs },
-    Clean { #[command(flatten)] project: ProjectArgs, #[arg(long)] dry_run: bool },
 }
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
     #[command(flatten)]
     pub project: ProjectArgs,
-    #[arg(long)]
-    pub name: String,
-    #[arg(long)]
-    pub headless: bool,
-    #[arg(long, value_name = "RES")]
+    #[arg(long, value_name = "RES", help = "Scene to run (default: the project main scene)")]
     pub scene: Option<String>,
+    #[arg(long, help = "Run with a window (default headless)")]
+    pub windowed: bool,
+    #[arg(long, default_value = "120", help = "Stop after this many process frames")]
+    pub frames: u64,
+    #[arg(long, value_name = "/pointer=value", help = "Stop when this checkpoint equals the value")]
+    pub until: Option<String>,
+    #[arg(long, default_value = "60", help = "Wall-clock seconds for the whole run")]
+    pub timeout: u64,
     #[arg(long, default_value = "20")]
     pub ready_timeout: u64,
+    #[arg(long, help = "Also collect a network observation at the end")]
+    pub net: bool,
     #[arg(last = true, allow_hyphen_values = true)]
     pub arguments: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct InspectArgs {
-    #[command(flatten)]
-    pub project: ProjectArgs,
-    pub session: String,
-    #[arg(long)]
-    pub net: bool,
-    #[arg(long)]
-    pub checkpoints: bool,
-    #[arg(long, requires = "checkpoints", conflicts_with = "net")]
-    pub compare: Option<String>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ScenarioCommand {
-    Start { #[command(flatten)] project: ProjectArgs, name: String },
-    Status { #[command(flatten)] project: ProjectArgs, name: String },
-    Disconnect { #[command(flatten)] project: ProjectArgs, name: String, participant: String },
-    Crash { #[command(flatten)] project: ProjectArgs, name: String, participant: String },
-    Stop { #[command(flatten)] project: ProjectArgs, name: String },
 }

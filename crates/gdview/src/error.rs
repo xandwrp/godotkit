@@ -26,8 +26,6 @@ pub enum Error {
     Scene { path: Option<PathBuf>, message: String },
     #[error("scene expansion: {0}")]
     Expansion(String),
-    #[error("glTF: {0}")]
-    Gltf(String),
     #[error("variant json: {0}")]
     Variant(String),
 }

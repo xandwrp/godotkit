@@ -24,7 +24,7 @@ fn check_exit_code_follows_report_outcome() { todo!() }
 
 #[test]
 #[ignore = "scaffold"]
-fn scene_tree_autoloads_animation_list_and_cache_status_need_no_engine() { todo!() }
+fn scene_tree_autoloads_refs_settings_net_and_static_check_need_no_engine() { todo!() }
 
 #[test]
 #[ignore = "scaffold"]

@@ -1,6 +1,6 @@
 //! Text scene (`.tscn`) and text resource (`.tres`) files as data.
 //!
-//! This replaces every ad-hoc `.tscn` scan in the old code (net.rs, animation.rs).
+//! This replaces every ad-hoc `.tscn` scan in the old code (v0.1 net.rs and friends).
 //! Node properties, sub-resources, ext-resources, connections, and line numbers
 //! are all first-class here so nobody re-parses text downstream.
 //!

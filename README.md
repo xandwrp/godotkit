@@ -9,6 +9,11 @@ every public signature, flow, and acceptance test is in place; bodies are `todo!
 | [`crates/gdproject`](crates/gdproject) | A project bound to its engine: config, probe, process supervision, harness protocol, every engine-backed operation. | gdview |
 | [`crates/gdkit`](crates/gdkit) | The CLI. Args, rendering, exit codes. No logic. | both |
 
+The command surface is exactly what [docs/AGENT_USE.md](docs/AGENT_USE.md)
+lists: `check` (static then engine, `--slice`, `--script`, `--baseline`), `api`,
+`refs`, `settings`, `resource`, `scene-tree`, `autoloads`, `net`, `import`,
+`run`, `init`, `doctor`. Nothing else is stubbed, on purpose.
+
 Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the rules each crate
 enforces, the call flow for every command, the harness protocol, and the test
 matrix. Each module's doc comment lists its acceptance tests by name; the same

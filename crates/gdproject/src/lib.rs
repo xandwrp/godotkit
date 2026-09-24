@@ -3,6 +3,8 @@
 //! Rules for this crate:
 //! - Every engine invocation goes through [`runner`]. No `Command::new(engine)` anywhere else.
 //! - Every invocation has a deadline. There is no "wait forever".
+//! - Nothing outlives the gdkit invocation. A game launched by [`run`] is killed when
+//!   `run` returns, so there is no pid bookkeeping across calls.
 //! - Never mutates a file the user authored. Writes go to `.godot/gdkit/**`,
 //!   to scratch copies, or to brand-new files published with create-new semantics.
 //! - Operations return `Ok(report)` when the *tool* worked, even if the *project*
@@ -13,13 +15,12 @@
 //!
 //! Layering:
 //! ```text
-//! config, process, protocol, diagnostics, records          (no engine)
-//!   └─ workspace, engine                                   (filesystem state, probe)
-//!        └─ runner                                         (one engine invocation)
-//!             └─ check, api, resource, animation, cache, session, probe, scenario
+//! config, process, protocol, diagnostics             (no engine)
+//!   └─ workspace, engine                             (filesystem state, probe)
+//!        └─ runner                                   (one engine invocation)
+//!             └─ check, api, resource, cache, run    (operations; probe serves run)
 //! ```
 
-pub mod animation;
 pub mod api;
 pub mod cache;
 pub mod check;
@@ -30,11 +31,9 @@ pub mod error;
 pub mod probe;
 pub mod process;
 pub mod protocol;
-pub mod records;
 pub mod resource;
+pub mod run;
 pub mod runner;
-pub mod scenario;
-pub mod session;
 pub mod workspace;
 
 pub use engine::Engine;

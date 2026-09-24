@@ -15,7 +15,7 @@ fn cache_key_changes_with_engine_fingerprint_or_extension_library_bytes() {
 
 #[test]
 #[ignore = "scaffold"]
-fn cache_is_skipped_when_reflection_run_printed_errors() {
+fn cache_is_skipped_when_dump_run_printed_errors() {
     todo!()
 }
 
@@ -39,6 +39,12 @@ fn dump_outside_a_project_uses_an_empty_scratch_project() {
 
 #[test]
 #[ignore = "requires GDKIT_TEST_GODOT"]
-fn real_engine_reflects_gdextension_classes_and_inheritance() {
+fn real_engine_dump_parses_and_includes_builtins_utilities_and_docs() {
+    todo!()
+}
+
+#[test]
+#[ignore = "requires GDKIT_TEST_GODOT"]
+fn real_engine_dump_includes_project_gdextension_classes() {
     todo!()
 }

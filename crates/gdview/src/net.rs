@@ -1,8 +1,7 @@
 //! Static multiplayer analysis: what the project's sources say about RPCs,
 //! replication, and authority. Observations, not lint. Unknowns stay explicit.
-//! Pure function of declarations + scenes; the engine-backed enrichment
-//! (actual `get_rpc_config()` results, autoload node paths) is layered on by
-//! gdproject and merged via [`NetReport::merge_engine_facts`].
+//! Pure function of declarations + scenes + autoloads. No engine is involved;
+//! `gdkit net` is entirely offline.
 //!
 //! # Tests (tests/net.rs)
 //! - `finds_rpc_endpoints_from_annotations_with_godot_defaults`
@@ -149,18 +148,6 @@ pub fn analyze(input: &NetInput<'_>) -> NetReport {
     todo!()
 }
 
-/// Facts only the engine knows: the effective `get_rpc_config()` per script,
-/// used to confirm or contradict annotation-derived endpoints.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct EngineFacts {
-    pub rpc_configs: Vec<(ResPath, Vec<(String, RpcConfig)>)>,
-}
-
-impl NetReport {
-    pub fn merge_engine_facts(&mut self, facts: &EngineFacts) {
-        todo!()
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Explanation {

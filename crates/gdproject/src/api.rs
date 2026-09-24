@@ -1,17 +1,26 @@
-//! Native API reflection (cached) merged with project declarations (live).
+//! Engine API index from `--dump-extension-api-with-docs`, cached per engine +
+//! project extension set, merged with live project declarations.
 //!
-//! Cache key: engine fingerprint + hash of the project's `.gdextension` files
-//! and every library they point at (relative or `res://`). A harness run that
-//! prints `ERROR:` never populates the cache.
+//! Flow: cache hit on (engine fingerprint, extension fingerprint) → parse cached
+//! index. Miss → `run_engine` with `--dump-extension-api-with-docs` in a temp dir
+//! (with `--path <project>` so registered GDExtension classes can appear) →
+//! `ApiIndex::from_extension_api_json` → atomic cache write unless the run
+//! printed `ERROR:`.
 //!
-//! # Tests (tests/api.rs, offline with `fake-godot` returning a canned index)
+//! To verify on the target engine: whether project GDExtension classes appear in
+//! the dump under `--path`. If they do not, `extension_classes` stays empty and a
+//! small ClassDB harness is the documented follow-up, scoped to that delta only.
+//!
+//! # Tests (tests/api.rs, offline with `fake-godot` writing a canned dump)
 //! - `load_populates_cache_then_reuses_it`
 //! - `cache_key_changes_with_engine_fingerprint_or_extension_library_bytes`
-//! - `cache_is_skipped_when_reflection_run_printed_errors`
+//! - `cache_is_skipped_when_dump_run_printed_errors`
 //! - `cache_write_is_atomic_and_corrupt_cache_is_replaced_not_fatal`
 //! - `project_api_prefers_native_then_project_classes_and_reports_shadowing`
 //! - `dump_outside_a_project_uses_an_empty_scratch_project`
-//!   Engine (`#[ignore]`): `real_engine_reflects_gdextension_classes_and_inheritance`
+//!
+//! Engine (`#[ignore]`): `real_engine_dump_parses_and_includes_builtins_utilities_and_docs`,
+//! `real_engine_dump_includes_project_gdextension_classes` (the open question above)
 
 use std::path::Path;
 use std::time::Duration;
@@ -22,14 +31,14 @@ use gdview::declarations::ProjectDeclarations;
 use crate::engine::Engine;
 use crate::workspace::Workspace;
 
-pub const DEFAULT_REFLECT_DEADLINE: Duration = Duration::from_secs(120);
+pub const DEFAULT_DUMP_DEADLINE: Duration = Duration::from_secs(120);
 
-/// Reflects (or loads from cache) the native index for this engine + project.
+/// Dumps (or loads from cache) the native index for this engine + project.
 pub fn load_native(workspace: &Workspace, engine: &Engine, deadline: Duration) -> crate::Result<ApiIndex> {
     todo!()
 }
 
-/// Reflects with an empty scratch project; no cache. For `--dump-json` outside a project.
+/// Dumps with an empty scratch project; no cache. For `api --dump` outside a project.
 pub fn load_native_standalone(engine: &Engine, deadline: Duration) -> crate::Result<ApiIndex> {
     todo!()
 }
@@ -55,6 +64,10 @@ impl ProjectApi {
     pub fn lookup_member(&self, class: &str, member: &str) -> MemberLookup<'_> {
         todo!()
     }
+    /// Utility functions and global enums when `class` is not given.
+    pub fn lookup_global(&self, name: &str) -> GlobalLookup<'_> {
+        todo!()
+    }
     pub fn search(&self, term: &str, limit: usize) -> Vec<SearchResult<'_>> {
         todo!()
     }
@@ -76,7 +89,13 @@ pub enum MemberView<'a> {
     Project(&'a gdview::declarations::MemberDeclaration),
 }
 
+pub enum GlobalLookup<'a> {
+    Utility(&'a gdview::api::ApiMethod),
+    Enum(&'a gdview::api::ApiEnum),
+    Missing { suggestions: Vec<String> },
+}
+
 pub struct SearchResult<'a> {
-    pub class: ClassView<'a>,
-    pub member: Option<String>,
+    pub hit: gdview::api::SearchHit<'a>,
+    pub project_class: Option<&'a gdview::declarations::ScriptDeclaration>,
 }

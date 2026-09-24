@@ -51,7 +51,19 @@ fn project_script_timeout_is_recorded_as_timeout_and_stops_further_runtime_phase
 
 #[test]
 #[ignore = "scaffold"]
-fn smoke_error_output_fails_even_with_zero_exit() {
+fn static_findings_fail_the_check_before_any_engine_phase_runs() {
+    todo!()
+}
+
+#[test]
+#[ignore = "scaffold"]
+fn baseline_classifies_new_carried_and_resolved_by_identity_not_line() {
+    todo!()
+}
+
+#[test]
+#[ignore = "scaffold"]
+fn suggestions_are_attached_only_when_an_api_index_is_cached() {
     todo!()
 }
 
@@ -87,6 +99,6 @@ fn real_engine_autoloads_are_available_to_project_scripts() {
 
 #[test]
 #[ignore = "requires GDKIT_TEST_GODOT"]
-fn real_engine_blocked_ready_scene_times_out_without_orphans() {
+fn real_engine_blocked_autoload_import_times_out_without_orphans() {
     todo!()
 }

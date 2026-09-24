@@ -5,12 +5,10 @@
 //! - `unknown_keys_are_rejected_with_the_offending_path`
 //! - `ignore_rules_require_error_prefix_and_res_source`
 //! - `checkpoint_adapter_must_be_res_gd_without_dot_dot`
-//! - `scenario_configs_validate_roles_ports_and_readiness_pointers`
 //! - `select_engine_precedence_is_flag_then_env_then_config`
 //! - `relative_engine_paths_resolve_against_the_config_file`
 //! - `write_initial_refuses_to_overwrite_and_stores_relative_path`
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -26,9 +24,7 @@ pub struct Config {
     #[serde(default)]
     pub check: CheckConfig,
     #[serde(default)]
-    pub inspect: InspectConfig,
-    #[serde(default)]
-    pub scenarios: BTreeMap<String, crate::scenario::ScenarioConfig>,
+    pub run: RunConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -57,7 +53,8 @@ pub struct IgnoreRule {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct InspectConfig {
+pub struct RunConfig {
+    /// Script implementing `collect_checkpoints(tree: SceneTree) -> Dictionary`.
     pub checkpoint_adapter: Option<gdview::ResPath>,
 }
 
@@ -67,7 +64,7 @@ impl Config {
         todo!()
     }
 
-    /// Semantic validation beyond serde: rule shapes, adapter path, scenarios.
+    /// Semantic validation beyond serde: rule shapes, adapter path.
     pub fn validate(&self, path: &Path) -> crate::Result<()> {
         todo!()
     }

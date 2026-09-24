@@ -1,4 +1,4 @@
-//! `net`: workspace → gdview declarations + parsed scenes + autoloads → gdview::net::analyze → unless --offline, engine + run_harness NetFacts → merge_engine_facts → optional explain → emit.
+//! `net` (offline): Project::discover → declarations + parsed scenes + autoloads → gdview::net::analyze → optional explain → emit. No engine.
 
 use crate::cli::*;
 use crate::context::Context;

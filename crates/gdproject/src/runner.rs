@@ -8,7 +8,7 @@
 //! - `run_harness_maps_error_envelope_to_error_harness_with_stage`
 //! - `run_harness_maps_missing_envelope_to_error_protocol`
 //! - `run_harness_enforces_deadline_and_reports_timeout_with_partial_output`
-//! - `run_engine_is_the_raw_form_used_for_import_and_scene_smoke`
+//! - `run_engine_is_the_raw_form_used_for_import_dump_and_run`
 //! - `temp_files_are_removed_after_every_outcome_including_panic`
 
 use std::ffi::OsString;
@@ -29,11 +29,8 @@ pub enum Harness {
     Probe,
     Check,
     ImportScan,
-    Api,
     ResourceSchema,
     ResourceCreate,
-    Animation,
-    NetFacts,
     RuntimeProbe,
     ScriptBootstrap,
 }
@@ -44,11 +41,8 @@ impl Harness {
             Harness::Probe => "probe",
             Harness::Check => "check",
             Harness::ImportScan => "import_scan",
-            Harness::Api => "api",
             Harness::ResourceSchema => "resource_schema",
             Harness::ResourceCreate => "resource_create",
-            Harness::Animation => "animation",
-            Harness::NetFacts => "net_facts",
             Harness::RuntimeProbe => "runtime_probe",
             Harness::ScriptBootstrap => "script_bootstrap",
         }
@@ -58,11 +52,8 @@ impl Harness {
             Harness::Probe => include_str!("harness/probe.gd"),
             Harness::Check => include_str!("harness/check.gd"),
             Harness::ImportScan => include_str!("harness/import_scan.gd"),
-            Harness::Api => include_str!("harness/api.gd"),
             Harness::ResourceSchema => include_str!("harness/resource_schema.gd"),
             Harness::ResourceCreate => include_str!("harness/resource_create.gd"),
-            Harness::Animation => include_str!("harness/animation.gd"),
-            Harness::NetFacts => include_str!("harness/net_facts.gd"),
             Harness::RuntimeProbe => include_str!("harness/runtime_probe.gd"),
             Harness::ScriptBootstrap => include_str!("harness/script_bootstrap.gd"),
         }
@@ -85,7 +76,7 @@ pub struct Invocation<'a> {
     /// Directory passed to `--path`. A scratch copy for `check`, the real project otherwise.
     pub project_dir: &'a Path,
     pub deadline: Duration,
-    /// Extra engine flags before `--script` (e.g. `--quiet`, `--import`).
+    /// Extra engine flags before `--script` (e.g. `--quiet`, `--import`, `--dump-extension-api-with-docs`).
     pub engine_args: Vec<OsString>,
     /// Arguments after `--`, visible via `OS.get_cmdline_user_args()`.
     pub user_args: Vec<OsString>,
@@ -94,14 +85,7 @@ pub struct Invocation<'a> {
 
 impl<'a> Invocation<'a> {
     pub fn new(engine: &'a Engine, project_dir: &'a Path, deadline: Duration) -> Self {
-        Self {
-            engine,
-            project_dir,
-            deadline,
-            engine_args: Vec::new(),
-            user_args: Vec::new(),
-            env: Vec::new(),
-        }
+        Self { engine, project_dir, deadline, engine_args: Vec::new(), user_args: Vec::new(), env: Vec::new() }
     }
 }
 
@@ -113,15 +97,18 @@ pub struct HarnessRun<T> {
 
 /// `<engine> --headless --no-header [--editor] --path <dir> --script <tmp>/<harness>.gd -- <user_args…>`
 /// Decodes the envelope; an `ok: false` envelope becomes `Error::Harness`.
-pub fn run_harness<T: DeserializeOwned>(
-    invocation: &Invocation<'_>,
-    harness: Harness,
-) -> crate::Result<HarnessRun<T>> {
+pub fn run_harness<T: DeserializeOwned>(invocation: &Invocation<'_>, harness: Harness) -> crate::Result<HarnessRun<T>> {
     todo!()
 }
 
-/// Raw engine run with no harness: `--editor --import`, scene smoke, etc.
+/// Raw engine run with no harness: `--editor --import`, the extension-api dump, etc.
 /// The caller interprets exit status and diagnostics.
 pub fn run_engine(invocation: &Invocation<'_>) -> crate::Result<(Captured, Vec<Diagnostic>)> {
+    todo!()
+}
+
+/// Spawns the engine as the game for [`crate::run`]: `--path <project> [--headless] --script runtime_probe.gd [scene] -- <args>`.
+/// Returns the guard and the temp dir holding the harness (dropped with the guard).
+pub fn spawn_game(invocation: &Invocation<'_>, log: &Path) -> crate::Result<crate::process::ChildGuard> {
     todo!()
 }

@@ -1,17 +1,21 @@
-//! Project validation: import a disposable copy, load every script/scene/resource
-//! in a fresh process, optionally run project scripts and scene smoke tests.
+//! Project validation: static cross-reference checks, then import a disposable
+//! copy, load every script/scene/resource in a fresh process, then optionally run
+//! project scripts.
 //!
 //! Flow (each step is a private fn; `run` only sequences them and fills the report):
+//! 0. `static_analysis` gdview::xref over the (sliced) sources, no engine   (phase StaticAnalysis, milliseconds)
 //! 1. `scan`            gdview file query on the copy → manifest + project fingerprint
 //! 2. `cache_import`    `run_engine --editor --quiet --import`      (phase Import)
 //! 3. `import_scan`     `run_harness ImportScan`  (waits for the FS scanner, loads scripts)
 //! 4. `class_cache_audit`  compares `.godot/global_script_class_cache.cfg` in the copy to gdview declarations
 //! 5. `load_all`        `run_harness Check`       (phase ResourceLoading; strict policy set in `_init`)
 //! 6. `project_script`  per `--script`: `run_harness ScriptBootstrap` with deadline
-//! 7. `smoke`           per `--scene`:  `run_engine <scene> --quit-after N` with deadline
+//! 7. `enrich`          `diagnostics::suggest` with the api index when it is already cached (never dumps)
+//! 8. `baseline`        when given, classify diagnostics as new / carried / resolved by `identity`
 //!
-//! Steps 6–7 are skipped (recorded as skipped) if anything before failed.
-//! Every captured stream is preserved under the artifact dir before it is parsed.
+//! Step 6 is skipped (recorded as skipped) if anything before failed. Static
+//! findings fail the check like engine errors do. Every captured stream is
+//! preserved under the artifact dir before it is parsed.
 //!
 //! # Tests (tests/check.rs)
 //! Offline with `fake-godot` (scripted to emit chosen output per phase):
@@ -23,14 +27,16 @@
 //! - `class_cache_audit_reports_missing_moved_and_stale_entries`
 //! - `slice_builds_minimal_project_and_rejects_bad_paths`
 //! - `project_script_timeout_is_recorded_as_timeout_and_stops_further_runtime_phases`
-//! - `smoke_error_output_fails_even_with_zero_exit`
+//! - `static_findings_fail_the_check_before_any_engine_phase_runs`
+//! - `baseline_classifies_new_carried_and_resolved_by_identity_not_line`
+//! - `suggestions_are_attached_only_when_an_api_index_is_cached`
 //! - `artifacts_hold_raw_streams_and_event_log_for_every_phase`
 //! - `report_json_round_trips_and_exit_mapping_is_0_1_2`
 //!   Engine (`#[ignore]`, GDKIT_TEST_GODOT):
 //! - `real_engine_missing_method_is_reported_with_res_path_and_line`
 //! - `real_engine_strict_methods_turns_unsafe_call_into_error`
 //! - `real_engine_autoloads_are_available_to_project_scripts`
-//! - `real_engine_blocked_ready_scene_times_out_without_orphans`
+//! - `real_engine_blocked_autoload_import_times_out_without_orphans`
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -51,11 +57,12 @@ pub struct CheckRequest {
     pub strict_methods: Option<bool>,
     pub scripts: Vec<gdview::ResPath>,
     pub script_deadline: Duration,
-    pub scenes: Vec<gdview::ResPath>,
-    pub smoke_frames: u32,
-    pub smoke_deadline: Duration,
     /// Deadline for the import and load phases, which are otherwise unbounded.
     pub phase_deadline: Duration,
+    /// Skip the engine phases; static analysis only.
+    pub static_only: bool,
+    /// A previous report to diff against.
+    pub baseline: Option<CheckReport>,
 }
 
 impl Default for CheckRequest {
@@ -65,10 +72,9 @@ impl Default for CheckRequest {
             strict_methods: None,
             scripts: Vec::new(),
             script_deadline: Duration::from_secs(30),
-            scenes: Vec::new(),
-            smoke_frames: 2,
-            smoke_deadline: Duration::from_secs(30),
             phase_deadline: Duration::from_secs(600),
+            static_only: false,
+            baseline: None,
         }
     }
 }
@@ -104,7 +110,18 @@ pub struct CheckReport {
     pub counts: Option<Counts>,
     pub failures: Vec<Failure>,
     pub suppressed_diagnostics: usize,
+    /// Present only when a baseline was supplied.
+    pub baseline: Option<BaselineComparison>,
     pub artifact_dir: PathBuf,
+}
+
+/// Diagnostics partitioned by `Diagnostic::identity` against a previous report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaselineComparison {
+    pub baseline_fingerprint: String,
+    pub new: Vec<Diagnostic>,
+    pub carried: Vec<Diagnostic>,
+    pub resolved: Vec<Diagnostic>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,20 +176,20 @@ pub struct Policy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseId {
     pub kind: PhaseKind,
-    /// `import`, `scene_smoke:2:res://x.tscn`, …
+    /// `static_analysis`, `import`, `project_script:2:res://x.gd`, …
     pub id: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PhaseKind {
+    StaticAnalysis,
     FileScan,
     EngineValidation,
     Import,
     ClassCacheAudit,
     ResourceLoading,
     ProjectScript,
-    SceneSmoke,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,8 +218,8 @@ pub struct Counts {
     pub scripts: usize,
     pub scenes: usize,
     pub resources: usize,
+    pub static_findings: usize,
     pub project_scripts_run: usize,
-    pub smoke_scenes_run: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +232,7 @@ pub struct Failure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureKind {
+    StaticFinding,
     Diagnostic,
     ProcessExit,
     Timeout,

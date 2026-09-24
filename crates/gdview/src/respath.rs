@@ -84,7 +84,7 @@ impl From<ResPath> for String {
 }
 
 /// A `uid://` identifier as it appears in scenes and `.uid` sidecars.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Uid(pub String);
 
 /// A Godot node path such as `Player/Camera3D` or `/root/Match`.
