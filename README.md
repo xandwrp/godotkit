@@ -1,6 +1,6 @@
 # gdkit
 
-Godot 4 development utility belt, rebuilt as three crates. This is the v0.2 scaffold:
+Godot 4 development utility belt, rebuilt as three crates. This is the v0.1.0 scaffold:
 every public signature, flow, and acceptance test is in place; bodies are `todo!()`.
 
 | Crate | Job | Depends on |
