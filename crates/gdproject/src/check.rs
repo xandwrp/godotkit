@@ -9,8 +9,8 @@
 //! 5. `load_all`        `run_harness Check`       (phase ResourceLoading; strict policy set in `_init`)
 //! 6. `project_script`  per `--script`: `run_harness ScriptBootstrap` with deadline
 //! 7. `smoke`           per `--scene`:  `run_engine <scene> --quit-after N` with deadline
-//! Steps 6–7 are skipped (recorded as skipped) if anything before failed.
-//! Every captured stream is preserved under the artifact dir before it is parsed.
+//!   Steps 6–7 are skipped (recorded as skipped) if anything before failed.
+//!   Every captured stream is preserved under the artifact dir before it is parsed.
 //!
 //! # Tests (tests/check.rs)
 //! Offline with `fake-godot` (scripted to emit chosen output per phase):
@@ -25,7 +25,7 @@
 //! - `smoke_error_output_fails_even_with_zero_exit`
 //! - `artifacts_hold_raw_streams_and_event_log_for_every_phase`
 //! - `report_json_round_trips_and_exit_mapping_is_0_1_2`
-//! Engine (`#[ignore]`, GDKIT_TEST_GODOT):
+//!   Engine (`#[ignore]`, GDKIT_TEST_GODOT):
 //! - `real_engine_missing_method_is_reported_with_res_path_and_line`
 //! - `real_engine_strict_methods_turns_unsafe_call_into_error`
 //! - `real_engine_autoloads_are_available_to_project_scripts`

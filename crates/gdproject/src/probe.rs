@@ -11,8 +11,8 @@
 //! - `network_observation_decodes_peers_authority_and_events`
 //! - `checkpoints_report_adapter_errors_as_status_not_transport_error`
 //! - `compare_produces_json_pointer_differences_in_stable_order`
-//! Engine (`#[ignore]`): `real_engine_probe_reports_ready_and_answers_network_query`,
-//! `real_engine_script_error_does_not_freeze_the_session`.
+//!   Engine (`#[ignore]`): `real_engine_probe_reports_ready_and_answers_network_query`,
+//!   `real_engine_script_error_does_not_freeze_the_session`.
 
 use std::time::Duration;
 

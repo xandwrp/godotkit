@@ -6,7 +6,7 @@
 //!    Adapter errors and transport timeouts during polling mean "not ready yet", not failure.
 //! 3. Resolve `{port.*}` placeholders from server checkpoints; launch `client`s; poll readiness.
 //! 4. Launch `late_client`s the same way. Persist `Ready`.
-//! Any failure: stop every participant launched so far (kill after grace), persist `Failed` with the reason.
+//!   Any failure: stop every participant launched so far (kill after grace), persist `Failed` with the reason.
 //!
 //! # Tests (tests/scenario.rs, offline with `fake-godot` scripted per participant)
 //! - `config_validation_rejects_unknown_roles_duplicate_names_and_bad_pointers`

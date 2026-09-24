@@ -11,7 +11,7 @@
 //! - `cache_write_is_atomic_and_corrupt_cache_is_replaced_not_fatal`
 //! - `project_api_prefers_native_then_project_classes_and_reports_shadowing`
 //! - `dump_outside_a_project_uses_an_empty_scratch_project`
-//! Engine (`#[ignore]`): `real_engine_reflects_gdextension_classes_and_inheritance`
+//!   Engine (`#[ignore]`): `real_engine_reflects_gdextension_classes_and_inheritance`
 
 use std::path::Path;
 use std::time::Duration;

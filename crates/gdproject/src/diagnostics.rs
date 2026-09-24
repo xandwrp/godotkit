@@ -74,6 +74,7 @@ pub fn parse(captured: &Captured, sequence_base: u64) -> Vec<Diagnostic> {
 }
 
 /// Removes diagnostics matching a rule; returns how many were suppressed.
+#[allow(clippy::ptr_arg)] // removal needs the Vec
 pub fn apply_ignore_rules(diagnostics: &mut Vec<Diagnostic>, rules: &[IgnoreRule]) -> usize {
     todo!()
 }

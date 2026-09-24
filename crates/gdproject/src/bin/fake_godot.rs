@@ -8,9 +8,9 @@
 //! - `FAKE_GODOT_EXIT`         exit code (default 0)
 //! - `FAKE_GODOT_DELAY_MS`     sleep before exiting (for deadline tests)
 //! - `FAKE_GODOT_READY_FILE`   when acting as a game: touch this file with a probe endpoint, then serve
-//!                             canned probe responses on the port until killed
-//! It records every invocation's argv to `$FAKE_GODOT_LOG` (one JSON line each)
-//! so tests can assert exact command lines.
+//!                               canned probe responses on the port until killed
+//!   It records every invocation's argv to `$FAKE_GODOT_LOG` (one JSON line each)
+//!   so tests can assert exact command lines.
 //!
 //! Tests: tests/fake_godot.rs `fake_engine_honours_each_mode` (keeps the fake honest).
 
