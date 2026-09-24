@@ -9,8 +9,9 @@
 //! 5. `load_all`        `run_harness Check`       (phase ResourceLoading; strict policy set in `_init`)
 //! 6. `project_script`  per `--script`: `run_harness ScriptBootstrap` with deadline
 //! 7. `smoke`           per `--scene`:  `run_engine <scene> --quit-after N` with deadline
-//!   Steps 6–7 are skipped (recorded as skipped) if anything before failed.
-//!   Every captured stream is preserved under the artifact dir before it is parsed.
+//!
+//! Steps 6–7 are skipped (recorded as skipped) if anything before failed.
+//! Every captured stream is preserved under the artifact dir before it is parsed.
 //!
 //! # Tests (tests/check.rs)
 //! Offline with `fake-godot` (scripted to emit chosen output per phase):

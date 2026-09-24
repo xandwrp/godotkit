@@ -7,7 +7,8 @@
 //!    with `CACHE_MODE_IGNORE`, and echoes every property back; any divergence is an error envelope.
 //! 4. Compare echo to spec in Rust (second, independent verification).
 //! 5. `workspace::publish_new_file(staged, destination)`.
-//!   A `WARNING:` in engine output is reported, never a failure. `ERROR:` fails at stage `engine`.
+//!
+//! A `WARNING:` in engine output is reported, never a failure. `ERROR:` fails at stage `engine`.
 //!
 //! # Tests (tests/resource.rs)
 //! Offline: `spec_validation_rejects_bad_targets_paths_and_variants`, `destination_must_be_new_tres_inside_project`,
