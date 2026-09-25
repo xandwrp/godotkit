@@ -1,6 +1,4 @@
 //! `check`: workspace → (engine unless --static-only) → CheckRequest from args (+ config strict_methods, baseline file parsed as a CheckReport) → gdproject::check::run with a stderr observer (silent in JSON mode) → emit report → Exit from report.outcome.
-//!
-//! Only `--static-only` is implemented; the engine phases land next.
 
 use std::io::Write;
 use std::time::Duration;
@@ -13,18 +11,18 @@ use crate::context::Context;
 use crate::render::{self, Exit, Human};
 
 pub fn run(ctx: &Context, args: CheckArgs) -> gdproject::Result<Exit> {
-    if !args.static_only {
+    if args.static_only && !args.script.is_empty() {
         return Err(gdproject::Error::Invalid(
-            "`check` without --static-only needs the engine phases, which are not implemented in this build; run `gdkit check --static-only`".into(),
+            "--script runs in the engine and cannot be combined with --static-only".into(),
         ));
-    }
-    if !args.script.is_empty() {
-        return Err(gdproject::Error::Invalid("--script runs in the engine and cannot be combined with --static-only".into()));
     }
     let workspace = ctx.workspace(&args.project)?;
     let baseline = match &args.baseline {
         Some(path) => {
-            let text = std::fs::read_to_string(path).map_err(|source| gdproject::Error::Io { path: path.clone(), source })?;
+            let text = std::fs::read_to_string(path).map_err(|source| gdproject::Error::Io {
+                path: path.clone(),
+                source,
+            })?;
             Some(serde_json::from_str::<CheckReport>(&text)?)
         }
         None => None,
@@ -43,12 +41,48 @@ pub fn run(ctx: &Context, args: CheckArgs) -> gdproject::Result<Exit> {
         static_only: args.static_only,
         baseline,
     };
-    let report = if ctx.json() {
-        gdproject::check::run(&workspace, None, &request, &mut gdproject::check::NoObserver)?
+    let engine = if args.static_only {
+        None
     } else {
-        gdproject::check::run(&workspace, None, &request, &mut StderrProgress)?
+        Some(ctx.engine(&workspace, &args.project)?)
     };
-    render::emit(ctx.output, &report).map_err(|source| gdproject::Error::Io { path: "<stdout>".into(), source })?;
+    let report = if ctx.json() {
+        gdproject::check::run(
+            &workspace,
+            engine.as_ref(),
+            &request,
+            &mut gdproject::check::NoObserver,
+        )?
+    } else {
+        gdproject::check::run(&workspace, engine.as_ref(), &request, &mut StderrProgress)?
+    };
+    // The observer has no raw-stream callback; replay persisted streams after completion.
+    if args.verbose && !ctx.json() {
+        let mut stderr = std::io::stderr().lock();
+        for phase in &report.phases {
+            for path in &phase.artifacts {
+                if matches!(
+                    path.extension().and_then(|s| s.to_str()),
+                    Some("stdout" | "stderr")
+                ) {
+                    let bytes = std::fs::read(path).map_err(|source| gdproject::Error::Io {
+                        path: path.clone(),
+                        source,
+                    })?;
+                    writeln!(stderr, "{} ({}):", phase.id.id, path.display())
+                        .and_then(|()| stderr.write_all(&bytes))
+                        .map_err(|source| gdproject::Error::Io {
+                            path: "<stderr>".into(),
+                            source,
+                        })?;
+                }
+            }
+        }
+    }
+    render::emit(ctx.output, &report).map_err(|source| gdproject::Error::Io {
+        path: "<stdout>".into(),
+        source,
+    })?;
     Ok(match report.outcome {
         Outcome::Passed => Exit::Ok,
         Outcome::Failed | Outcome::Incomplete => Exit::Failed,
@@ -62,7 +96,12 @@ impl CheckObserver for StderrProgress {
         eprintln!("{}...", phase.id);
     }
     fn phase_finished(&mut self, phase: &PhaseId, outcome: PhaseOutcome, elapsed: Duration) {
-        eprintln!("{}: {} in {} ms", phase.id, outcome_word(outcome), elapsed.as_millis());
+        eprintln!(
+            "{}: {} in {} ms",
+            phase.id,
+            outcome_word(outcome),
+            elapsed.as_millis()
+        );
     }
 }
 
@@ -84,6 +123,16 @@ impl Human for CheckReport {
             for diagnostic in &phase.diagnostics {
                 write_diagnostic(out, diagnostic)?;
             }
+        }
+        for failure in &self.failures {
+            let phase = failure
+                .phase
+                .as_ref()
+                .map_or("check", |phase| phase.id.as_str());
+            writeln!(out, "{phase}: failure: {}", failure.message)?;
+        }
+        if let Some(path) = &self.artifact_dir {
+            writeln!(out, "artifacts: {}", path.display())?;
         }
         if let Some(baseline) = &self.baseline {
             writeln!(
@@ -123,7 +172,10 @@ fn write_diagnostic(out: &mut dyn Write, diagnostic: &Diagnostic) -> std::io::Re
         (Some(resource), None) => format!("{resource}: "),
         _ => String::new(),
     };
-    let code = diagnostic.code.as_deref().map_or_else(String::new, |code| format!(" [{code}]"));
+    let code = diagnostic
+        .code
+        .as_deref()
+        .map_or_else(String::new, |code| format!(" [{code}]"));
     writeln!(out, "{location}{severity}: {}{code}", diagnostic.message)?;
     if !diagnostic.suggestions.is_empty() {
         writeln!(out, "  did you mean: {}", diagnostic.suggestions.join(", "))?;

@@ -33,12 +33,39 @@ impl Context {
     /// `Config::load` → `select_engine(flag, env, config)` → `Engine::attach` (cached probe).
     /// Prints `engine: <path> (<version>)` to stderr in human mode.
     pub fn engine(&self, workspace: &Workspace, args: &ProjectArgs) -> gdproject::Result<Engine> {
-        todo!()
+        let config = gdproject::config::Config::load(workspace.root())?;
+        let selection = gdproject::config::select_engine(
+            workspace.root(),
+            args.godot.as_deref(),
+            self.env_godot.as_ref(),
+            config.as_ref(),
+        )?;
+        let (engine, _) = Engine::attach(&selection, workspace, self.probe_deadline)?;
+        self.announce_engine(&engine);
+        Ok(engine)
     }
 
     /// Engine without a project, for `api --dump` outside one.
     pub fn standalone_engine(&self, explicit: Option<&Path>) -> gdproject::Result<Engine> {
-        todo!()
+        let selection = gdproject::config::select_engine(
+            Path::new("."),
+            explicit,
+            self.env_godot.as_ref(),
+            None,
+        )?;
+        let engine = Engine::attach_standalone(&selection, self.probe_deadline)?;
+        self.announce_engine(&engine);
+        Ok(engine)
+    }
+
+    fn announce_engine(&self, engine: &Engine) {
+        if !self.json() {
+            eprintln!(
+                "engine: {} ({})",
+                engine.executable.display(),
+                engine.version
+            );
+        }
     }
 
     pub fn json(&self) -> bool {
