@@ -13,7 +13,15 @@ pub trait Human {
 
 /// Writes JSON (one document, trailing newline) or the human form.
 pub fn emit<T: Serialize + Human>(output: Output, report: &T) -> std::io::Result<()> {
-    todo!()
+    let mut stdout = std::io::stdout().lock();
+    match output {
+        Output::Json => {
+            serde_json::to_writer_pretty(&mut stdout, report)?;
+            writeln!(stdout)?;
+        }
+        Output::Human => report.human(&mut stdout)?,
+    }
+    stdout.flush()
 }
 
 /// What a command returns. `main` maps it to the process exit code.

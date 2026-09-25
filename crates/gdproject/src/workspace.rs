@@ -23,7 +23,9 @@ pub struct Workspace {
 impl Workspace {
     /// Opens the project at `root` (no discovery; the CLI decides that).
     pub fn open(root: &Path) -> crate::Result<Self> {
-        todo!()
+        let project = Project::open(root)?;
+        let state_dir = project.root().join(".godot").join("gdkit");
+        Ok(Self { project, state_dir })
     }
     pub fn project(&self) -> &Project {
         &self.project

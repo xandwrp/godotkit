@@ -56,9 +56,36 @@ fn unresolved_uid_is_extracted_from_message() {
 }
 
 #[test]
-#[ignore = "scaffold"]
 fn identity_ignores_line_and_occurrences_but_keeps_message_and_resource() {
-    todo!()
+    use gdproject::diagnostics::{Diagnostic, Severity, Stream};
+    let base = Diagnostic {
+        sequence: 0,
+        severity: Severity::Error,
+        stream: Stream::Tool,
+        code: Some("GDKIT_MISSING_NODE".into()),
+        message: "node path \"A\" is missing".into(),
+        resource: Some("res://a.gd".into()),
+        line: Some(3),
+        column: Some(1),
+        frames: Vec::new(),
+        timestamp_unix_ms: None,
+        occurrences: 1,
+        is_shutdown_noise: false,
+        identity: String::new(),
+        suggestions: Vec::new(),
+    };
+    let identity = base.compute_identity();
+    let moved = Diagnostic { sequence: 9, line: Some(30), column: None, occurrences: 4, stream: Stream::Stderr, ..base.clone() };
+    assert_eq!(moved.compute_identity(), identity);
+    for changed in [
+        Diagnostic { message: "node path \"B\" is missing".into(), ..base.clone() },
+        Diagnostic { resource: Some("res://b.gd".into()), ..base.clone() },
+        Diagnostic { resource: None, ..base.clone() },
+        Diagnostic { severity: Severity::Warning, ..base.clone() },
+        Diagnostic { code: None, ..base.clone() },
+    ] {
+        assert_ne!(changed.compute_identity(), identity, "{changed:?}");
+    }
 }
 
 #[test]

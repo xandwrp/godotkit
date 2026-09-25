@@ -1,7 +1,13 @@
 # gdkit
 
 Godot 4 development utility belt, rebuilt as three crates. This is the v0.1.0 scaffold:
-every public signature, flow, and acceptance test is in place; bodies are `todo!()`.
+every public signature, flow, and acceptance test is in place; bodies are `todo!()`
+except where a feature has landed.
+
+Landed: `check --static-only` (with `--slice` and `--baseline`), end to end. That is
+gdview's syntax, `respath`, `project`, `files`, scene parsing, `uid`, `declarations`, and
+`xref::analyze`; gdproject's static phase and report; the CLI's `check`, JSON and human
+output. `check` without `--static-only` exits 2 until the engine phases land.
 
 | Crate | Job | Depends on |
 | --- | --- | --- |

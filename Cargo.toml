@@ -20,6 +20,8 @@ toml = "0.8"
 ignore = "0.4"
 clap = { version = "4", features = ["derive"] }
 anstream = "1"
+unicode-ident = "1"
+tempfile = "3"
 
 [workspace.lints.rust]
 unused_variables = "allow" # scaffold: bodies are todo!(); remove once implemented

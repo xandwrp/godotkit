@@ -26,7 +26,8 @@ impl Context {
 
     /// `Project::discover(args.project)` then `Workspace::open`.
     pub fn workspace(&self, args: &ProjectArgs) -> gdproject::Result<Workspace> {
-        todo!()
+        let project = gdview::Project::discover(&args.project)?;
+        Workspace::open(project.root())
     }
 
     /// `Config::load` → `select_engine(flag, env, config)` → `Engine::attach` (cached probe).

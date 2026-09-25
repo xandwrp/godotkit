@@ -75,8 +75,20 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
+    /// blake3 over severity, code, message, and resource; hex, 16 chars.
+    /// Line, column, occurrences, and sequence are excluded so an edit that
+    /// moves a diagnostic does not make it "new".
     pub fn compute_identity(&self) -> String {
-        todo!()
+        let mut hasher = blake3::Hasher::new();
+        let severity = match self.severity {
+            Severity::Warning => "warning",
+            Severity::Error => "error",
+        };
+        for part in [severity, self.code.as_deref().unwrap_or(""), &self.message, self.resource.as_deref().unwrap_or("")] {
+            hasher.update(&(part.len() as u64).to_le_bytes());
+            hasher.update(part.as_bytes());
+        }
+        hasher.finalize().to_hex()[..16].to_owned()
     }
 }
 

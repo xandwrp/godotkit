@@ -2,9 +2,14 @@
 #![allow(unused)]
 
 #[test]
-#[ignore = "scaffold"]
 fn open_requires_a_project_and_creates_state_dir_lazily() {
-    todo!()
+    let dir = tempfile::tempdir().unwrap();
+    assert!(gdproject::Workspace::open(dir.path()).is_err());
+    std::fs::write(dir.path().join("project.godot"), "config_version=5\n").unwrap();
+    let workspace = gdproject::Workspace::open(dir.path()).unwrap();
+    assert_eq!(workspace.root(), dir.path());
+    assert_eq!(workspace.state_dir(), dir.path().join(".godot/gdkit"));
+    assert!(!dir.path().join(".godot").exists(), "opening must not write");
 }
 
 #[test]

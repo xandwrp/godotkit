@@ -31,3 +31,14 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// Attaches a file path to a `Parse` or `Scene` error that was produced from a string.
+    pub fn with_path(self, path: PathBuf) -> Self {
+        match self {
+            Error::Parse { path: None, line, message } => Error::Parse { path: Some(path), line, message },
+            Error::Scene { path: None, message } => Error::Scene { path: Some(path), message },
+            other => other,
+        }
+    }
+}

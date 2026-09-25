@@ -25,6 +25,8 @@ use serde::Serialize;
 
 use crate::respath::{NodePath, ResPath, Uid};
 
+mod text;
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SceneFile {
     pub kind: FileKind,
@@ -83,9 +85,13 @@ pub struct SceneNode {
 }
 
 impl SceneNode {
-    /// `Root/Child/Leaf` relative to the scene root, `.` for the root itself.
+    /// Path relative to the scene root, as `get_node` from the root would take
+    /// it: `.` for the root, `Child/Leaf` below it.
     pub fn path(&self) -> NodePath {
-        todo!()
+        match self.parent.as_ref().map(|parent| parent.0.as_str()) {
+            None => NodePath(".".into()),
+            Some(parent) => NodePath(parent.into()).join(&self.name),
+        }
     }
 }
 
@@ -97,6 +103,8 @@ pub struct Connection {
     pub method: String,
     pub flags: Option<u32>,
     pub binds: Vec<Value>,
+    /// Trailing signal arguments dropped before the call (`Callable.unbind`).
+    pub unbinds: u32,
     pub line: usize,
 }
 
@@ -125,17 +133,38 @@ pub enum Value {
 }
 
 impl Value {
+    /// Contents of a `String` or `StringName`.
     pub fn as_str(&self) -> Option<&str> {
-        todo!()
+        match self {
+            Value::Str(text) | Value::StringName(text) => Some(text),
+            _ => None,
+        }
     }
+    /// `ExtResource("id")` / `SubResource("id")`; format-2 integer ids are accepted.
     pub fn as_resource_ref(&self) -> Option<ResourceRef> {
-        todo!()
+        let Value::Call { name, args } = self else { return None };
+        let id = match args.as_slice() {
+            [Value::Str(id)] => id.clone(),
+            [Value::Int(id)] => id.to_string(),
+            _ => return None,
+        };
+        match name.as_str() {
+            "ExtResource" => Some(ResourceRef::Ext(id)),
+            "SubResource" => Some(ResourceRef::Sub(id)),
+            _ => None,
+        }
+    }
+    fn as_int(&self) -> Option<i64> {
+        match self {
+            Value::Int(value) => Some(*value),
+            _ => None,
+        }
     }
 }
 
 /// Parses a `.tscn` or `.tres` text.
 pub fn parse(source: &str) -> crate::Result<SceneFile> {
-    todo!()
+    text::parse(source)
 }
 
 impl SceneFile {
@@ -143,19 +172,45 @@ impl SceneFile {
         self.nodes.first()
     }
     pub fn ext_resource(&self, id: &str) -> Option<&ExtResource> {
-        todo!()
+        self.ext_resources.iter().find(|resource| resource.id == id)
     }
     pub fn sub_resource(&self, id: &str) -> Option<&SubResource> {
-        todo!()
+        self.sub_resources.iter().find(|resource| resource.id == id)
     }
     pub fn resolve(&self, reference: &ResourceRef) -> Option<Resolved<'_>> {
-        todo!()
+        match reference {
+            ResourceRef::Ext(id) => self.ext_resource(id).map(Resolved::Ext),
+            ResourceRef::Sub(id) => self.sub_resource(id).map(Resolved::Sub),
+        }
     }
+    /// `.` is the root; `./A` and `A` are the same node.
     pub fn node(&self, path: &NodePath) -> Option<&SceneNode> {
-        todo!()
+        let wanted = normalize(&path.0);
+        self.nodes.iter().find(|node| normalize(&node.path().0) == wanted)
     }
     pub fn children_of(&self, path: &NodePath) -> impl Iterator<Item = &SceneNode> {
-        std::iter::empty()
+        let wanted = normalize(&path.0);
+        self.nodes
+            .iter()
+            .filter(move |node| node.parent.as_ref().is_some_and(|parent| normalize(&parent.0) == wanted))
+    }
+    /// The `.tscn` an inherited scene extends: a root with `instance=` and no `type`.
+    pub fn inherited_base(&self) -> Option<&ExtResource> {
+        let root = self.root()?;
+        match (&root.instance, &root.type_name) {
+            (Some(reference @ ResourceRef::Ext(_)), None) => match self.resolve(reference)? {
+                Resolved::Ext(resource) => Some(resource),
+                Resolved::Sub(_) => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+fn normalize(path: &str) -> &str {
+    match path.trim_start_matches("./") {
+        "" => ".",
+        path => path,
     }
 }
 
@@ -172,7 +227,12 @@ pub trait SceneSource {
 
 impl SceneSource for crate::Project {
     fn load(&self, path: &ResPath) -> crate::Result<Option<SceneFile>> {
-        todo!()
+        let os_path = self.globalize(path);
+        if !os_path.is_file() {
+            return Ok(None);
+        }
+        let source = self.read_to_string(path)?;
+        parse(&source).map(Some).map_err(|error| error.with_path(os_path))
     }
 }
 
