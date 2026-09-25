@@ -1,0 +1,37 @@
+[package]
+name = "gdproject"
+description = "A Godot project bound to its engine: config, engine probe, process supervision, harness protocol, and every engine-backed operation gdkit exposes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Builds the `fake-godot` binary used by this crate's own integration tests.
+test-engine = []
+
+[[bin]]
+name = "fake-godot"
+path = "src/bin/fake_godot.rs"
+required-features = ["test-engine"]
+
+[dependencies]
+gdview.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+toml.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects"] }
+
+[dev-dependencies]
+gdproject = { path = ".", features = ["test-engine"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

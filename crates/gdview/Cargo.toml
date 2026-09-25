@@ -1,0 +1,20 @@
+[package]
+name = "gdview"
+description = "Read-only Godot project introspection: discovery, settings, scenes, GDScript syntax and declarations, resources, glTF, static multiplayer analysis. No engine, no writes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ignore.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+unicode-ident.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

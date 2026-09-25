@@ -1,7 +1,7 @@
 # Third-party notices
 
-The GDScript syntax frontend is provided by the gdview dependency and re-exported
-as `gdkit::syntax`. Its syntax kinds, grammar productions, and indentation
+The GDScript syntax frontend lives in `crates/gdview/src/syntax` (ported from the
+standalone gdview crate at the revision below). Its syntax kinds, grammar productions, and indentation
 handling are adapted from gdscript-syntax in reactive-ui-toolkit/gdscript-analyzer.
 
 Dependency: https://github.com/xandwr/gdview
