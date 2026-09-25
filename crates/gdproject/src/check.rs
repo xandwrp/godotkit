@@ -10,10 +10,12 @@
 //! 4. `class_cache_audit`  compares `.godot/global_script_class_cache.cfg` in the copy to gdview declarations
 //! 5. `load_all`        `run_harness Check`       (phase ResourceLoading; strict policy set in `_init`)
 //! 6. `project_script`  per `--script`: `run_harness ScriptBootstrap` with deadline
-//! API-cache diagnostic enrichment is explicitly deferred; this operation never dumps or loads an API index.
+//! 7. (deferred)        API-cache diagnostic enrichment; this operation never dumps or loads an API index.
 //! 8. `baseline`        when given, classify diagnostics as new / carried / resolved by `identity`
 //!
-//! Step 6 is skipped (recorded as skipped) if anything before failed. Static
+//! Step 6 is skipped (recorded as skipped) if anything before failed. Error
+//! diagnostics fail their phase, except shutdown noise (leak reports at exit),
+//! which is reported but never decides a verdict. Static
 //! findings not carried by the baseline block engine phases. Carried findings
 //! retain their failures and failed verdict but permit engine validation. Every captured stream and event
 //! log is preserved under the artifact dir before its verdict is interpreted.
@@ -39,15 +41,16 @@
 //! - `baseline_classifies_new_carried_and_resolved_by_identity_not_line`
 //! - `suggestions_are_attached_only_when_an_api_index_is_cached`
 //! - `artifacts_hold_raw_streams_and_event_log_for_every_phase`
-//! - `report_json_round_trips_and_exit_mapping_is_0_1_2`
-//!   Engine (`#[ignore]`, GDKIT_TEST_GODOT):
+//! - `report_json_round_trips_and_outcomes_map_to_exit_0_or_1`
+//!
+//! Engine (`#[ignore]`, GDKIT_TEST_GODOT):
 //! - `real_engine_missing_method_is_reported_with_res_path_and_line`
 //! - `real_engine_strict_methods_turns_unsafe_call_into_error`
 //! - `real_engine_autoloads_are_available_to_project_scripts`
 //! - `real_engine_blocked_autoload_import_times_out_without_orphans`
 
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gdview::ResPath;
@@ -107,33 +110,36 @@ pub fn run(
     request: &CheckRequest,
     observer: &mut dyn CheckObserver,
 ) -> crate::Result<CheckReport> {
-    if request.static_only && !request.scripts.is_empty() {
-        return Err(crate::Error::Invalid(
-            "static-only checks cannot run project scripts".into(),
-        ));
-    }
-    let slice = validate_slice(&request.slice)?;
+    let slice = validate(workspace, request)?;
     let engine = match (engine, request.static_only) {
         (Some(engine), _) => Some(engine),
         (None, true) => None,
         (None, false) => return Err(crate::Error::NoEngine),
     };
     let config = crate::config::Config::load(workspace.root())?.unwrap_or_default();
-    let analysis = static_analysis(workspace, &slice, observer)?;
+    let analysis = static_analysis(workspace, &slice.res_paths, observer)?;
     let mut resolution_coverage =
         HashSet::from([(PhaseKind::StaticAnalysis, analysis.phase.id.id.clone())]);
     let phases = vec![analysis.phase];
     // Baselines relax only the engine gate, never the static verdict or evidence.
-    let has_new_static_findings = analysis.findings.iter().any(|diagnostic| {
-        !request.baseline.as_ref().is_some_and(|baseline| {
-            baseline
-                .phases
+    // Each baseline occurrence excuses one current occurrence of its identity, so
+    // a repeat of a known finding is still new.
+    let has_new_static_findings = match &request.baseline {
+        None => !analysis.findings.is_empty(),
+        Some(baseline) => {
+            let mut allowance = identity_counts(
+                baseline
+                    .phases
+                    .iter()
+                    .filter(|p| p.id.kind == PhaseKind::StaticAnalysis)
+                    .flat_map(|p| &p.diagnostics),
+            );
+            analysis
+                .findings
                 .iter()
-                .filter(|p| p.id.kind == PhaseKind::StaticAnalysis)
-                .flat_map(|p| &p.diagnostics)
-                .any(|d| d.identity == diagnostic.identity)
-        })
-    });
+                .any(|diagnostic| !take_one(&mut allowance, &diagnostic.identity))
+        }
+    };
     let failures: Vec<Failure> = analysis
         .findings
         .iter()
@@ -159,7 +165,7 @@ pub fn run(
         project: ProjectIdentity {
             root: workspace.root().to_path_buf(),
             fingerprint: analysis.fingerprint,
-            sliced: !slice.is_empty(),
+            sliced: !slice.res_paths.is_empty(),
         },
         policy: Policy {
             strict_methods: request
@@ -176,15 +182,15 @@ pub fn run(
     };
     if !request.static_only {
         if !has_new_static_findings {
-            engine_phases(
+            resolution_coverage.extend(engine_phases(
                 workspace,
                 engine.expect("validated engine"),
                 request,
+                &slice.paths,
                 &config.check,
                 observer,
                 &mut report,
-                &mut resolution_coverage,
-            )?;
+            )?);
         } else {
             report
                 .phases
@@ -195,11 +201,73 @@ pub fn run(
         report.baseline = Some(compare_to_baseline(
             &report,
             baseline,
-            &slice,
+            &slice.res_paths,
             &resolution_coverage,
         ));
     }
     Ok(report)
+}
+
+/// Reads a previous `--output json` report. Reports written under another
+/// [`CHECK_REPORT_SCHEMA_VERSION`] are rejected before their shape is parsed.
+pub fn read_baseline(path: &Path) -> crate::Result<CheckReport> {
+    let text = std::fs::read_to_string(path).map_err(|source| crate::Error::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
+    let version = value.get("schema_version").and_then(|v| v.as_u64());
+    if version != Some(CHECK_REPORT_SCHEMA_VERSION.into()) {
+        return Err(crate::Error::Invalid(format!(
+            "baseline {}: report schema_version {} is not supported (expected {}); regenerate the baseline",
+            path.display(),
+            version.map_or_else(|| "missing".into(), |v| v.to_string()),
+            CHECK_REPORT_SCHEMA_VERSION
+        )));
+    }
+    Ok(serde_json::from_value(value)?)
+}
+
+/// Rejects a request that can never produce a report (exit 2 in the CLI) before
+/// any engine is probed or run: project scripts in a static-only check, and
+/// slice entries that are unsafe or do not exist in the project.
+pub fn validate(workspace: &Workspace, request: &CheckRequest) -> crate::Result<Slice> {
+    if request.static_only && !request.scripts.is_empty() {
+        return Err(crate::Error::Invalid(
+            "static-only checks cannot run project scripts".into(),
+        ));
+    }
+    validate_slice(workspace.root(), &request.slice)
+}
+
+/// Validated, normalized `--slice` entries. Both lists are empty for the whole
+/// project; the root (`.`) is kept as `res://` / an empty path.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Slice {
+    pub res_paths: Vec<ResPath>,
+    /// Project-relative paths with `.` components removed.
+    pub paths: Vec<PathBuf>,
+}
+
+fn identity_counts<'a>(
+    diagnostics: impl IntoIterator<Item = &'a Diagnostic>,
+) -> HashMap<&'a str, usize> {
+    let mut counts = HashMap::new();
+    for diagnostic in diagnostics {
+        *counts.entry(diagnostic.identity.as_str()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Consumes one occurrence of `identity`; false when none remain.
+fn take_one(counts: &mut HashMap<&str, usize>, identity: &str) -> bool {
+    match counts.get_mut(identity) {
+        Some(count) if *count > 0 => {
+            *count -= 1;
+            true
+        }
+        _ => false,
+    }
 }
 
 #[derive(Deserialize)]
@@ -272,40 +340,10 @@ fn fail(
     });
 }
 
-fn engine_phases(
-    workspace: &Workspace,
-    engine: &Engine,
-    request: &CheckRequest,
-    config: &crate::config::CheckConfig,
-    observer: &mut dyn CheckObserver,
-    report: &mut CheckReport,
-    resolution_coverage: &mut HashSet<(PhaseKind, String)>,
-) -> crate::Result<()> {
-    use crate::runner::{self, Harness, Invocation};
-    use crate::workspace::IsolatedCopy;
-    let copy = if request.slice.is_empty()
-        || request.slice.iter().any(|p| p == std::path::Path::new("."))
-    {
-        IsolatedCopy::full(workspace.project())?
-    } else {
-        IsolatedCopy::slice(workspace.project(), &request.slice)?
-    };
-    let project = Workspace::open(&copy.path)?;
-    // Inventory precedes import and artifact creation. The default query excludes
-    // .godot (including old artifacts); engine registries decide load eligibility.
-    let files = project
-        .project()
-        .files(&gdview::files::FileQuery::default())?;
-    let manifest: Vec<ResPath> = files
-        .iter()
-        .map(|p| project.project().localize(p))
-        .collect::<gdview::Result<_>>()?;
-    let artifacts = workspace.new_artifact_dir("check")?;
-    report.artifact_dir = Some(artifacts.path.clone());
-    let manifest_path = artifacts.write(
-        "manifest.json",
-        &serde_json::to_vec(&manifest).expect("serializable paths"),
-    )?;
+/// Every engine phase a non-static request runs, in order, with its harness.
+/// Skipped reports list exactly these phases too.
+fn engine_stages(request: &CheckRequest) -> Vec<(Phase, Option<crate::runner::Harness>)> {
+    use crate::runner::Harness;
     let mut stages = vec![
         (blank_phase(PhaseKind::Import, "import"), None),
         (
@@ -330,6 +368,45 @@ fn engine_phases(
             Some(Harness::ScriptBootstrap),
         )
     }));
+    stages
+}
+
+/// Runs the engine stages into `report`; returns the phases whose completed
+/// work can resolve baseline diagnostics.
+fn engine_phases(
+    workspace: &Workspace,
+    engine: &Engine,
+    request: &CheckRequest,
+    slice: &[PathBuf],
+    config: &crate::config::CheckConfig,
+    observer: &mut dyn CheckObserver,
+    report: &mut CheckReport,
+) -> crate::Result<HashSet<(PhaseKind, String)>> {
+    use crate::runner::{self, Harness, Invocation};
+    use crate::workspace::IsolatedCopy;
+    let mut resolution_coverage = HashSet::new();
+    let copy = if slice.is_empty() || slice.iter().any(|p| p.as_os_str().is_empty()) {
+        IsolatedCopy::full(workspace.project())?
+    } else {
+        IsolatedCopy::slice(workspace.project(), slice)?
+    };
+    let project = Workspace::open(copy.path())?;
+    // Inventory precedes import and artifact creation. The default query excludes
+    // .godot (including old artifacts); engine registries decide load eligibility.
+    let files = project
+        .project()
+        .files(&gdview::files::FileQuery::default())?;
+    let manifest: Vec<ResPath> = files
+        .iter()
+        .map(|p| project.project().localize(p))
+        .collect::<gdview::Result<_>>()?;
+    let artifacts = workspace.new_artifact_dir("check")?;
+    report.artifact_dir = Some(artifacts.path.clone());
+    let manifest_path = artifacts.write(
+        "manifest.json",
+        &serde_json::to_vec(&manifest).expect("serializable paths"),
+    )?;
+    let stages = engine_stages(request);
     let mut stopped = false;
     let mut script_index = 0;
     let mut editor_extensions = None;
@@ -369,7 +446,7 @@ fn engine_phases(
         } else {
             let mut invocation = Invocation::new(
                 engine,
-                &copy.path,
+                copy.path(),
                 if harness == Some(Harness::ScriptBootstrap) {
                     request.script_deadline
                 } else {
@@ -389,7 +466,6 @@ fn engine_phases(
                         .user_args
                         .push(request.scripts[script_index].as_str().into());
                     script_index += 1;
-                    report.counts.as_mut().unwrap().project_scripts_run += 1;
                 }
                 Some(_) => {
                     invocation
@@ -436,7 +512,11 @@ fn engine_phases(
                     &config.ignore_import_errors,
                 );
             }
-            for diagnostic in diagnostics.iter().filter(|d| d.severity == Severity::Error) {
+            // Leak reports at exit are reported, but say nothing about validity.
+            for diagnostic in diagnostics
+                .iter()
+                .filter(|d| d.severity == Severity::Error && !d.is_shutdown_noise)
+            {
                 fail(
                     report,
                     &mut phase,
@@ -501,6 +581,9 @@ fn engine_phases(
                     );
                 }
             }
+            if harness == Some(Harness::ScriptBootstrap) && script_ran_to_exit(&captured) {
+                report.counts.as_mut().unwrap().project_scripts_run += 1;
+            }
             if harness == Some(Harness::ImportScan) && phase.outcome == PhaseOutcome::Completed {
                 artifacts.write(
                     "editor-extensions.json",
@@ -525,7 +608,22 @@ fn engine_phases(
         stopped = phase.outcome != PhaseOutcome::Completed;
         report.phases.push(phase);
     }
-    Ok(())
+    Ok(resolution_coverage)
+}
+
+/// The script received control (exactly one startup marker) and its process
+/// then exited normally: no deadline, crash, or capture-limit kill. Its verdict
+/// may still be a failure.
+fn script_ran_to_exit(captured: &crate::process::Captured) -> bool {
+    let stdout = captured.stdout();
+    let markers = String::from_utf8_lossy(&stdout)
+        .lines()
+        .filter(|line| *line == "GDKIT_SCRIPT_STARTED")
+        .count();
+    markers == 1
+        && !captured.timed_out
+        && !captured.output_limit_exceeded
+        && captured.status.is_some_and(|s| s.code().is_some())
 }
 
 fn interpret_completion(
@@ -592,8 +690,12 @@ fn interpret_completion(
             );
         } else {
             let error = envelope.error.unwrap();
-            let validation_failure = harness == Harness::ScriptBootstrap
-                && matches!(error.stage.as_str(), "load" | "base");
+            // The requested scripts failed to load or to qualify: a verdict,
+            // not a harness that could not do its job.
+            let validation_failure = matches!(
+                (harness, error.stage.as_str()),
+                (Harness::ScriptBootstrap, "load" | "base") | (Harness::ImportScan, "load")
+            );
             fail(
                 report,
                 phase,
@@ -767,36 +869,53 @@ fn audit_class_cache(project: &gdview::Project) -> crate::Result<Vec<String>> {
     Ok(failures)
 }
 
-/// Slice entries become `res://` paths; `..`, absolute paths, and `.godot` are rejected.
-fn validate_slice(slice: &[PathBuf]) -> crate::Result<Vec<ResPath>> {
-    slice
-        .iter()
-        .map(|entry| {
-            let invalid = || {
-                crate::Error::Invalid(format!(
-                    "--slice {}: expected a project-relative path without `..`, outside .godot",
-                    entry.display()
-                ))
-            };
-            if entry.is_absolute() {
-                return Err(invalid());
-            }
-            let mut segments = Vec::new();
-            for component in entry.components() {
-                match component {
-                    std::path::Component::Normal(segment) => {
-                        segments.push(segment.to_str().ok_or_else(invalid)?)
-                    }
-                    std::path::Component::CurDir => {}
-                    _ => return Err(invalid()),
+/// Slice entries are normalized once, become `res://` paths, and must name an
+/// existing file or directory reached without symlinks inside the project.
+/// `..`, absolute paths, `.godot` and `.git` are rejected.
+fn validate_slice(root: &Path, slice: &[PathBuf]) -> crate::Result<Slice> {
+    let mut validated = Slice::default();
+    for entry in slice {
+        let invalid =
+            |reason: &str| crate::Error::Invalid(format!("--slice {}: {reason}", entry.display()));
+        let shape = "expected a project-relative path without `..`, outside .godot and .git";
+        let relative = entry
+            .to_str()
+            .and_then(|entry| crate::workspace::normalize_slice_path(entry).ok())
+            .ok_or_else(|| invalid(shape))?;
+        let path = PathBuf::from(&relative);
+        let res_path = if relative.is_empty() {
+            ResPath::root()
+        } else {
+            ResPath::from_relative(&relative).map_err(|_| invalid(shape))?
+        };
+        // Walk from the root so no component (including the entry) is a symlink.
+        let target = root.join(&path);
+        let mut current = root.to_path_buf();
+        for component in path.components() {
+            current.push(component);
+            let metadata = match std::fs::symlink_metadata(&current) {
+                Ok(metadata) => metadata,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(invalid("no such file or directory in the project"));
                 }
+                Err(source) => {
+                    return Err(crate::Error::Io {
+                        path: current,
+                        source,
+                    });
+                }
+            };
+            if metadata.file_type().is_symlink() {
+                return Err(invalid("symbolic links cannot be sliced"));
             }
-            if segments.is_empty() {
-                return Ok(ResPath::root());
+            if current != target && !metadata.is_dir() {
+                return Err(invalid("no such file or directory in the project"));
             }
-            ResPath::from_relative(&segments.join("/")).map_err(|_| invalid())
-        })
-        .collect()
+        }
+        validated.res_paths.push(res_path);
+        validated.paths.push(path);
+    }
+    Ok(validated)
 }
 
 struct StaticAnalysis {
@@ -936,17 +1055,10 @@ fn skipped_engine_phases(request: &CheckRequest, reason: &str) -> Vec<Phase> {
         diagnostics: Vec::new(),
         artifacts: Vec::new(),
     };
-    let mut phases = vec![
-        skipped(PhaseKind::Import, "import".into()),
-        skipped(PhaseKind::ResourceLoading, "resource_loading".into()),
-    ];
-    phases.extend(request.scripts.iter().enumerate().map(|(index, script)| {
-        skipped(
-            PhaseKind::ProjectScript,
-            format!("project_script:{index}:{script}"),
-        )
-    }));
-    phases
+    engine_stages(request)
+        .into_iter()
+        .map(|(phase, _)| skipped(phase.id.kind, phase.id.id))
+        .collect()
 }
 
 /// Resolution requires corresponding completed work and current path coverage.
@@ -977,18 +1089,22 @@ fn compare_to_baseline(
         .iter()
         .flat_map(|phase| phase.diagnostics.iter().map(move |d| (phase, d)))
         .collect();
-    let current_ids: HashSet<&str> = current.iter().map(|d| d.identity.as_str()).collect();
-    let previous_ids: HashSet<&str> = previous.iter().map(|(_, d)| d.identity.as_str()).collect();
+    // Multiset semantics per identity: up to the baseline's count is carried,
+    // extra current occurrences are new.
+    let mut allowance = identity_counts(previous.iter().map(|(_, d)| *d));
     let (carried, new): (Vec<Diagnostic>, Vec<Diagnostic>) = current
-        .into_iter()
-        .cloned()
-        .partition(|d| previous_ids.contains(d.identity.as_str()));
+        .iter()
+        .map(|d| (*d).clone())
+        .partition(|d| take_one(&mut allowance, &d.identity));
+    // Current occurrences match resolvable baseline occurrences first, so an
+    // occurrence is only claimed resolved when every current one is accounted for.
+    let mut remaining = identity_counts(current.iter().copied());
     let resolved = previous
         .into_iter()
         .filter(|(phase, d)| {
             resolution_coverage.contains(&(phase.id.kind, phase.id.id.clone()))
                 && covers(d)
-                && !current_ids.contains(d.identity.as_str())
+                && !take_one(&mut remaining, &d.identity)
         })
         .map(|(_, d)| d.clone())
         .collect();
@@ -1122,6 +1238,9 @@ pub struct Counts {
     pub scenes: usize,
     pub resources: usize,
     pub static_findings: usize,
+    /// Project scripts that received control and then exited normally (any exit
+    /// code, any verdict). Scripts that failed to load, timed out, crashed, or
+    /// hit the capture limit are not counted.
     pub project_scripts_run: usize,
 }
 

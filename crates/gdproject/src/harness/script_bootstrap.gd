@@ -29,5 +29,9 @@ func _load_script() -> void:
 		quit(1)
 		return
 	print("GDKIT_SCRIPT_STARTED")
+	# set_script runs the target's _init. The engine already called our
+	# _initialize, so forward it only when the target defines one, exactly as
+	# MainLoop's optional virtual would; _process and friends need nothing more.
 	set_script(target)
-	_initialize()
+	if has_method(&"_initialize"):
+		call(&"_initialize")

@@ -32,19 +32,19 @@ fn staged_file_is_removed_on_every_failure_path() {
 }
 
 #[test]
-#[ignore = "requires GDKIT_TEST_GODOT"]
+#[ignore = "scaffold"]
 fn real_engine_round_trips_every_variant_type() {
     todo!()
 }
 
 #[test]
-#[ignore = "requires GDKIT_TEST_GODOT"]
+#[ignore = "scaffold"]
 fn real_engine_schema_reports_fields_hints_enums_and_typed_arrays_from_hint_string() {
     todo!()
 }
 
 #[test]
-#[ignore = "requires GDKIT_TEST_GODOT"]
+#[ignore = "scaffold"]
 fn real_engine_create_nested_resources_and_refs() {
     todo!()
 }

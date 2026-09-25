@@ -74,6 +74,12 @@ func _check() -> void:
 			)
 		):
 			failures.append(path)
+		# Loading a Shader only stores its code; the server compiles it on first RID
+		# use. Headless 4.7's dummy renderer still runs ShaderLanguage there, so this
+		# reports SHADER ERROR lines for shaders no material references. Failure is
+		# visible only as engine diagnostics, which already fail validation.
+		if resource is Shader:
+			resource.get_rid()
 		if resource != null:
 			loaded.append(resource)
 	loaded.clear()

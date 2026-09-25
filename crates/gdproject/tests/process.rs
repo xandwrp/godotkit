@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 use gdproject::process::{self, OutputStream, Spawn, TerminateOutcome};
 
-const LIMIT: Duration = Duration::from_secs(5);
+// Generous: only failures wait this long, so a loaded machine cannot flake.
+const LIMIT: Duration = Duration::from_secs(20);
+/// Upper bound for "returned promptly" checks; still far below every 30s sleep.
+const PROMPT: Duration = Duration::from_secs(10);
 
 fn shell(script: &str) -> Spawn {
     Spawn::new("/bin/sh").args(["-c", script])
@@ -199,14 +202,14 @@ fn run_captures_a_line_larger_than_pipe_capacity() {
 fn run_enforces_deadline_and_reports_timed_out_with_partial_output() {
     let result = process::run(
         &shell("printf 'ready\npartial'; printf 'error fragment' >&2; sleep 30"),
-        Duration::from_millis(200),
+        Duration::from_secs(1),
     )
     .unwrap();
     assert!(result.timed_out);
     assert!(!result.success());
     assert!(result.status.is_some());
-    assert!(result.duration >= Duration::from_millis(200));
-    assert!(result.duration < Duration::from_secs(3));
+    assert!(result.duration >= Duration::from_secs(1));
+    assert!(result.duration < PROMPT);
     assert_eq!(result.stdout(), b"ready\npartial");
     assert_eq!(result.stderr(), b"error fragment");
 }
@@ -219,7 +222,7 @@ fn run_checks_deadline_even_when_output_never_stops() {
     )
     .unwrap();
     assert!(result.timed_out);
-    assert!(result.duration < Duration::from_secs(3));
+    assert!(result.duration < PROMPT);
     assert!(!result.stdout().is_empty());
     assert!(!result.stderr().is_empty());
 }
@@ -228,7 +231,7 @@ fn run_checks_deadline_even_when_output_never_stops() {
 fn zero_deadline_and_closed_streams_do_not_hang() {
     let result = process::run(&shell("exec 1>&- 2>&-; sleep 30"), Duration::ZERO).unwrap();
     assert!(result.timed_out);
-    assert!(result.duration < Duration::from_secs(3));
+    assert!(result.duration < PROMPT);
     let result = process::run(
         &shell("exec 1>&- 2>&-; sleep 30"),
         Duration::from_millis(100),
@@ -323,7 +326,7 @@ fn guard_terminate_waits_for_exit_and_escalates_to_kill_after_grace() {
         TerminateOutcome::Killed
     );
     assert!(start.elapsed() >= Duration::from_millis(100));
-    assert!(start.elapsed() < Duration::from_secs(3));
+    assert!(start.elapsed() < PROMPT);
     assert!(guard.try_wait().unwrap().is_some());
     assert_eq!(
         guard.terminate(LIMIT).unwrap(),
@@ -355,7 +358,7 @@ fn try_wait_reports_exit_status_without_blocking() {
     let mut guard = process::spawn(&spec, &dir.path().join("log")).unwrap();
     let start = Instant::now();
     assert!(guard.try_wait().unwrap().is_none());
-    assert!(start.elapsed() < Duration::from_secs(1));
+    assert!(start.elapsed() < PROMPT);
     fs::write(release, "").unwrap();
     eventually(|| guard.try_wait().unwrap().is_some());
     assert_eq!(guard.try_wait().unwrap().unwrap().code(), Some(23));
@@ -392,7 +395,7 @@ mod linux {
         use std::os::unix::process::ExitStatusExt;
         let result = process::run(
             &shell("sh -c 'sleep 30 & printf \"%s\\n%s\\n\" $$ $!; wait' & wait"),
-            Duration::from_millis(200),
+            Duration::from_secs(1),
         )
         .unwrap();
         assert!(result.timed_out);
@@ -414,7 +417,7 @@ mod linux {
         assert!(result.output_limit_exceeded);
         assert!(!result.timed_out);
         assert!(!result.success());
-        assert!(result.duration < Duration::from_secs(10));
+        assert!(result.duration < PROMPT);
         assert_eq!(result.lines.len(), process::MAX_CAPTURE_LINES);
         let processes = pids(&fs::read(pid_file).unwrap());
         assert_eq!(processes.len(), 2);
@@ -429,7 +432,7 @@ mod linux {
     fn run_kills_descendants_on_timeout() {
         let result = process::run(
             &shell("sleep 30 & printf '%s\n%s\n' $$ $!; wait"),
-            Duration::from_millis(200),
+            Duration::from_secs(1),
         )
         .unwrap();
         assert!(result.timed_out);
@@ -444,10 +447,45 @@ mod linux {
     fn run_cleans_up_descendants_after_leader_exit_without_waiting_for_pipe_eof() {
         let result = process::run(&shell("sleep 30 & printf '%s\n' $!; exit 0"), LIMIT).unwrap();
         assert!(result.success());
-        assert!(result.duration < Duration::from_secs(3));
+        assert!(result.duration < PROMPT);
         for pid in pids(&result.stdout()) {
             eventually(|| dead(pid));
         }
+    }
+
+    #[test]
+    fn run_bounds_the_drain_when_an_escaped_descendant_holds_the_pipes_open() {
+        struct KillOnDrop(u32);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("/bin/sh")
+                    .args(["-c", "kill -KILL \"$1\"", "kill"])
+                    .arg(self.0.to_string())
+                    .status();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("escaped");
+        // setsid leaves the group, so only a bounded drain (not EOF) ends capture.
+        let spec = shell(
+            r#"setsid sh -c 'echo $$ > "$1"; exec sleep 30' escaped "$1" &
+while [ ! -s "$1" ]; do sleep 0.01; done; printf 'leader done\n'"#,
+        )
+        .arg("fixture")
+        .arg(pid_file.as_os_str());
+        let result = process::run(&spec, LIMIT);
+        let escaped = KillOnDrop(pids(&fs::read(&pid_file).unwrap())[0]);
+        let result = result.unwrap();
+        assert!(result.success());
+        assert_eq!(result.stdout(), b"leader done\n");
+        assert!(result.duration < PROMPT);
+        // It escaped cleanup and still holds the inherited stdout/stderr.
+        assert!(!dead(escaped.0));
+        let stat = fs::read_to_string(format!("/proc/{}/stat", escaped.0)).unwrap();
+        let group = stat.rsplit_once(") ").unwrap().1.split(' ').nth(2).unwrap();
+        assert_ne!(group, result.pid.to_string());
+        drop(escaped);
     }
 
     #[test]
@@ -530,22 +568,30 @@ mod linux {
     }
 
     #[test]
-    fn guard_drop_and_terminate_clean_descendants_of_reaped_leader() {
-        for terminate in [false, true] {
+    fn guard_poll_terminate_and_drop_clean_descendants_of_exited_leader() {
+        let zombie = |pid: u32| {
+            fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| stat.rsplit_once(") ").unwrap().1.starts_with('Z'))
+        };
+        for mode in ["try_wait", "terminate", "drop"] {
             let dir = tempfile::tempdir().unwrap();
             let log = dir.path().join("log");
             let mut guard =
                 process::spawn(&shell("sleep 30 & printf '%s\n' $!; exit 0"), &log).unwrap();
-            eventually(|| guard.try_wait().unwrap().is_some());
+            // Observe the exit without the guard, which would clean up by itself.
+            eventually(|| zombie(guard.pid()));
             let children = pids(&fs::read(&log).unwrap());
             assert_eq!(children.len(), 1);
-            if terminate {
-                assert_eq!(
+            assert!(!dead(children[0]), "{mode}: descendant died before cleanup");
+            match mode {
+                "try_wait" => assert!(guard.try_wait().unwrap().unwrap().success()),
+                "terminate" => assert_eq!(
                     guard.terminate(LIMIT).unwrap(),
                     TerminateOutcome::AlreadyExited
-                );
+                ),
+                _ => drop(guard),
             }
-            drop(guard);
+            // Before any later drop: the operation itself must have cleaned up.
             for pid in children {
                 eventually(|| dead(pid));
             }

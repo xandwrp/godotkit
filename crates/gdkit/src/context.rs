@@ -24,7 +24,9 @@ impl Context {
         }
     }
 
-    /// `Project::discover(args.project)` then `Workspace::open`.
+    /// `Project::discover(args.project)` then `Workspace::open`. Both resolve the
+    /// canonical root, so `--project ../proj` and symlinked checkouts/ancestors
+    /// work and the report's `project.root` is the canonical path.
     pub fn workspace(&self, args: &ProjectArgs) -> gdproject::Result<Workspace> {
         let project = gdview::Project::discover(&args.project)?;
         Workspace::open(project.root())

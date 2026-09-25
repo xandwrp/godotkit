@@ -1,10 +1,14 @@
-// Acceptance tests for gdproject::config. No engine process or environment mutation.
+// Acceptance tests for gdproject::config. No engine process or environment mutation:
+// PATH lookups receive an explicit search path built from temp directories.
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use gdproject::Error;
-use gdproject::config::{CONFIG_FILE_NAME, Config, EngineConfig, SelectionSource, select_engine};
+use gdproject::config::{
+    CONFIG_FILE_NAME, Config, EngineConfig, SelectionSource, select_engine,
+    select_engine_with_search_path,
+};
 use tempfile::tempdir;
 
 fn load_text(root: &Path, text: &str) -> gdproject::Result<Option<Config>> {
@@ -51,6 +55,7 @@ fn load_returns_none_when_missing_and_error_when_malformed() {
         "engine = 42",
         "[engine]",
         "[engine]\nexecutable = ''",
+        "[engine]\nexecutable = ' \t'",
         "[check]\nstrict_methods = 'yes'",
     ] {
         assert!(!config_message(load_text(root, text).unwrap_err(), root).is_empty());
@@ -197,14 +202,21 @@ fn select_engine_precedence_is_flag_then_env_then_config() {
     assert!(
         matches!(select_engine(dir.path(), Some(&missing), Some(&env), Some(&config)), Err(Error::EngineNotFound(path)) if path == missing)
     );
-    for invalid in [
-        missing.into_os_string(),
-        OsString::new(),
-        dir.path().as_os_str().to_owned(),
-    ] {
+    for invalid in [missing.into_os_string(), dir.path().as_os_str().to_owned()] {
         assert!(matches!(
             select_engine(dir.path(), None, Some(&invalid), Some(&config)),
             Err(Error::EngineNotFound(_))
+        ));
+    }
+    // An empty or whitespace-only GDKIT_GODOT is unset: it falls back to gdkit.toml.
+    for blank in ["", " ", "\t\n"] {
+        let blank = OsString::from(blank);
+        let selected = select_engine(dir.path(), None, Some(&blank), Some(&config)).unwrap();
+        assert_eq!(selected.executable, configured);
+        assert_eq!(selected.source, SelectionSource::ProjectConfig);
+        assert!(matches!(
+            select_engine(dir.path(), None, Some(&blank), None),
+            Err(Error::NoEngine)
         ));
     }
     assert!(
@@ -239,25 +251,167 @@ fn relative_engine_paths_resolve_against_the_config_file() {
     );
 
     // CLI and environment paths are relative to the process, not the project.
-    let cwd = std::env::current_dir().unwrap();
-    let local = tempfile::Builder::new()
-        .prefix("config-engine-")
-        .tempfile_in(&cwd)
-        .unwrap();
-    let relative = Path::new(local.path().file_name().unwrap());
+    // Reach the temp file from the current directory without writing into it.
+    let relative = relative_to(&engine, &fs::canonicalize(".").unwrap());
+    assert!(relative.is_relative());
     let env = relative.as_os_str().to_owned();
-    for (explicit, environment) in [(Some(relative), None), (None, Some(&env))] {
+    for (explicit, environment) in [(Some(relative.as_path()), None), (None, Some(&env))] {
         assert_eq!(
             select_engine(&root, explicit, environment, None)
                 .unwrap()
                 .executable,
-            fs::canonicalize(local.path()).unwrap()
+            engine
         );
     }
 }
 
+/// `target` relative to `base`; both canonical and on the same volume.
+fn relative_to(target: &Path, base: &Path) -> PathBuf {
+    let target: Vec<_> = target.components().collect();
+    let base: Vec<_> = base.components().collect();
+    let common = target.iter().zip(&base).take_while(|(a, b)| a == b).count();
+    let mut relative = PathBuf::new();
+    for _ in &base[common..] {
+        relative.push("..");
+    }
+    for part in &target[common..] {
+        relative.push(part.as_os_str());
+    }
+    relative
+}
+
+fn executable(path: &Path) -> PathBuf {
+    let path = file(path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+fn search_path(directories: &[&Path]) -> OsString {
+    std::env::join_paths(directories).unwrap()
+}
+
 #[test]
-fn write_initial_refuses_to_overwrite_and_stores_relative_path() {
+fn bare_names_are_looked_up_on_path_and_paths_with_separators_are_not() {
+    let dir = tempdir().unwrap();
+    let (first, second, empty) = (
+        dir.path().join("first"),
+        dir.path().join("second"),
+        dir.path().join("empty"),
+    );
+    for directory in [&first, &second, &empty] {
+        fs::create_dir(directory).unwrap();
+    }
+    let name = format!("godot{}", std::env::consts::EXE_SUFFIX);
+    let shadowed = executable(&second.join(&name));
+    let path = search_path(&[&empty, &second]);
+    let config = engine_config(&name);
+    let root = dir.path().join("project");
+    fs::create_dir(&root).unwrap();
+    let flag = PathBuf::from(&name);
+    let env = OsString::from(&name);
+    for (explicit, environment, config, source) in [
+        (
+            Some(flag.as_path()),
+            None,
+            None,
+            SelectionSource::CommandLine,
+        ),
+        (None, Some(&env), None, SelectionSource::Environment),
+        (None, None, Some(&config), SelectionSource::ProjectConfig),
+    ] {
+        let selected =
+            select_engine_with_search_path(&root, explicit, environment, config, Some(&path))
+                .unwrap();
+        assert_eq!(selected.executable, shadowed);
+        assert_eq!(selected.source, source);
+    }
+    // Earlier PATH entries win.
+    let preferred = executable(&first.join(&name));
+    let both = search_path(&[&first, &second]);
+    assert_eq!(
+        select_engine_with_search_path(&root, Some(&flag), None, None, Some(&both))
+            .unwrap()
+            .executable,
+        preferred
+    );
+    // A bare name never falls back to the current directory or the project root.
+    executable(&root.join(&name));
+    for search in [None, Some(search_path(&[&empty]))] {
+        assert!(matches!(
+            select_engine_with_search_path(&root, Some(&flag), None, None, search.as_deref()),
+            Err(Error::EngineNotOnPath(missing)) if missing == flag
+        ));
+        assert!(matches!(
+            select_engine_with_search_path(&root, None, None, Some(&config), search.as_deref()),
+            Err(Error::EngineNotOnPath(_))
+        ));
+    }
+    // With a separator it is a path, even when PATH has a match.
+    let dotted = PathBuf::from(format!("./{name}"));
+    assert_eq!(
+        select_engine_with_search_path(
+            &root,
+            None,
+            None,
+            Some(&engine_config(&dotted)),
+            Some(&both)
+        )
+        .unwrap()
+        .executable,
+        fs::canonicalize(root.join(&name)).unwrap()
+    );
+    assert!(matches!(
+        select_engine_with_search_path(&root, Some(&dotted), None, None, Some(&both)),
+        Err(Error::EngineNotFound(_))
+    ));
+    // Directories named like the engine are skipped.
+    fs::create_dir(empty.join(&name)).unwrap();
+    assert_eq!(
+        select_engine_with_search_path(&root, Some(&flag), None, None, Some(&path))
+            .unwrap()
+            .executable,
+        shadowed
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn path_lookup_skips_files_that_are_not_executable() {
+    let dir = tempdir().unwrap();
+    let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    file(&first.join("godot"));
+    let runnable = executable(&second.join("godot"));
+    assert_eq!(
+        select_engine_with_search_path(
+            dir.path(),
+            Some(Path::new("godot")),
+            None,
+            None,
+            Some(&search_path(&[&first, &second]))
+        )
+        .unwrap()
+        .executable,
+        runnable
+    );
+}
+
+fn stored(root: &Path) -> PathBuf {
+    Config::load(root)
+        .unwrap()
+        .unwrap()
+        .engine
+        .unwrap()
+        .executable
+}
+
+#[test]
+fn write_initial_refuses_to_overwrite_and_stores_the_path_as_given() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("project");
     fs::create_dir(&root).unwrap();
@@ -266,10 +420,8 @@ fn write_initial_refuses_to_overwrite_and_stores_relative_path() {
     assert_eq!(path, root.join(CONFIG_FILE_NAME));
     let original = fs::read(&path).unwrap();
     let config = Config::load(&root).unwrap().unwrap();
-    assert_eq!(
-        config.engine.as_ref().unwrap().executable,
-        Path::new("../godot with spaces")
-    );
+    // Outside the project: absolute, never `../`-relative to the project depth.
+    assert_eq!(config.engine.as_ref().unwrap().executable, engine);
     assert_eq!(
         select_engine(&root, None, None, Some(&config))
             .unwrap()
@@ -291,17 +443,102 @@ fn write_initial_refuses_to_overwrite_and_stores_relative_path() {
     assert!(!path.exists());
     assert!(Config::write_initial(&root, &root.join("missing")).is_err());
     assert!(!path.exists());
+    // Inside the project: project-relative with `/`, and `./` at the root so the
+    // stored value is not read back as a bare PATH name.
     let nested = file(&root.join("engine"));
     Config::write_initial(&root, &nested).unwrap();
+    assert_eq!(stored(&root), Path::new("./engine"));
     assert_eq!(
-        Config::load(&root)
+        select_engine_with_search_path(
+            &root,
+            None,
+            None,
+            Config::load(&root).unwrap().as_ref(),
+            None
+        )
+        .unwrap()
+        .executable,
+        nested
+    );
+    fs::remove_file(&path).unwrap();
+    fs::create_dir_all(root.join("tools/bin")).unwrap();
+    let deep = file(&root.join("tools/bin/godot"));
+    Config::write_initial(&root, &root.join("tools/./bin/../bin/godot")).unwrap();
+    assert!(
+        fs::read_to_string(&path)
             .unwrap()
-            .unwrap()
-            .engine
+            .contains("executable = \"tools/bin/godot\"")
+    );
+    assert_eq!(
+        select_engine(&root, None, None, Config::load(&root).unwrap().as_ref())
             .unwrap()
             .executable,
-        Path::new("engine")
+        deep
     );
+}
+
+#[test]
+fn write_initial_stores_bare_names_bare_for_path_lookup() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("project");
+    let bin = dir.path().join("bin");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&bin).unwrap();
+    let name = format!("godot{}", std::env::consts::EXE_SUFFIX);
+    let path = search_path(&[&bin]);
+    assert!(matches!(
+        Config::write_initial_with_search_path(&root, Path::new(&name), Some(&path)),
+        Err(Error::EngineNotOnPath(_))
+    ));
+    assert!(!root.join(CONFIG_FILE_NAME).exists());
+    let engine = executable(&bin.join(&name));
+    Config::write_initial_with_search_path(&root, Path::new(&name), Some(&path)).unwrap();
+    assert_eq!(stored(&root), Path::new(&name));
+    assert_eq!(
+        select_engine_with_search_path(
+            &root,
+            None,
+            None,
+            Config::load(&root).unwrap().as_ref(),
+            Some(&path)
+        )
+        .unwrap()
+        .executable,
+        engine
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn write_initial_keeps_symlinks_and_the_absolute_path_as_given() {
+    use std::os::unix::fs::symlink;
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("project");
+    fs::create_dir(&root).unwrap();
+    // A version-manager style shim: the stored path must keep following it.
+    let versions = dir.path().join("versions");
+    fs::create_dir(&versions).unwrap();
+    let old = file(&versions.join("4.3"));
+    let new = file(&versions.join("4.4"));
+    let shim = dir.path().join("shim");
+    symlink(&old, &shim).unwrap();
+    Config::write_initial(&root, &shim).unwrap();
+    assert_eq!(stored(&root), shim);
+    fs::remove_file(&shim).unwrap();
+    symlink(&new, &shim).unwrap();
+    assert_eq!(
+        select_engine(&root, None, None, Config::load(&root).unwrap().as_ref())
+            .unwrap()
+            .executable,
+        new
+    );
+    // A project reached through a symlink still stores project-internal engines relatively.
+    fs::remove_file(root.join(CONFIG_FILE_NAME)).unwrap();
+    let alias = dir.path().join("alias");
+    symlink(&root, &alias).unwrap();
+    file(&root.join("godot"));
+    Config::write_initial(&alias, &root.join("godot")).unwrap();
+    assert_eq!(stored(&root), Path::new("./godot"));
 }
 
 #[cfg(unix)]

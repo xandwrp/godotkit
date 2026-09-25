@@ -44,6 +44,13 @@ impl Fake {
         let scenario_path = sidecar(".scenario.json");
         let log = sidecar(".log");
         fs::write(&scenario_path, scenario.to_string()).unwrap();
+        // The probe workspace production writes: real Godot's probe needs both.
+        fs::write(dir.path().join("project.godot"), "config_version=5\n").unwrap();
+        fs::write(
+            dir.path().join("probe.tres"),
+            "[gd_resource type=\"Resource\" format=3]\n\n[resource]\n",
+        )
+        .unwrap();
         Self {
             dir,
             executable,
@@ -60,17 +67,19 @@ impl Fake {
         process::run(&self.spawn(args), Duration::from_secs(5)).unwrap()
     }
 
-    fn harness(&self, name: &str, user_args: &[&str]) -> Captured {
-        let mut args = vec![
-            "--headless",
-            "--path",
-            self.dir.path().to_str().unwrap(),
-            "--script",
-            name,
-            "--",
-        ];
+    /// Production's shape: `--path` is the fixture dir and ImportScan gets `--editor`.
+    fn harness_spawn(&self, name: &str, user_args: &[&str]) -> Spawn {
+        let mut args = vec!["--headless", "--path", self.dir.path().to_str().unwrap()];
+        if name.ends_with("import_scan.gd") {
+            args.push("--editor");
+        }
+        args.extend(["--script", name, "--"]);
         args.extend_from_slice(user_args);
-        self.run(&args)
+        self.spawn(&args)
+    }
+
+    fn harness(&self, name: &str, user_args: &[&str]) -> Captured {
+        process::run(&self.harness_spawn(name, user_args), Duration::from_secs(5)).unwrap()
     }
 
     fn cache(&self) -> PathBuf {
@@ -89,6 +98,11 @@ fn stderr(captured: &Captured) -> String {
 fn envelope(captured: &Captured) -> Envelope<Value> {
     parse_envelope(stdout(captured).lines().map(str::to_owned)).unwrap()
 }
+
+/// Deadline for runs that must be killed after the fake flushes its output.
+/// Generous so a loaded CI box still starts the fake and flushes before the
+/// kill; the hanging fake never finishes on its own, so the property holds.
+const KILL_DEADLINE: Duration = Duration::from_secs(3);
 
 #[test]
 fn defaults_help_probe_and_missing_sidecar() {
@@ -125,11 +139,7 @@ fn fake_engine_honours_each_mode() {
         let fake = Fake::new(
             json!({"probe": {"mode": mode, "stdout":"noise\n", "stderr":"diagnostic\n"}}),
         );
-        let result = process::run(
-            &fake.spawn(&["--script", "probe.gd"]),
-            Duration::from_millis(300),
-        )
-        .unwrap();
+        let result = process::run(&fake.harness_spawn("probe.gd", &[]), KILL_DEADLINE).unwrap();
         assert!(stdout(&result).starts_with("noise\n"), "{mode}");
         assert_eq!(stderr(&result), "diagnostic\n");
         match mode {
@@ -209,7 +219,8 @@ fn bootstrap_specific_key_fallback_and_all_modes() {
     let normal = fake.harness("script_bootstrap.gd", &["res://normal.gd"]);
     assert_eq!(stdout(&normal), "GDKIT_SCRIPT_STARTED\nuser init\n");
     assert_eq!(normal.status.unwrap().code(), Some(7));
-    let fallback = fake.harness("script_bootstrap.gd", &["res://other.gd", "--import"]);
+    // A flag-like user argument after `--` is neither a flag nor a specific key.
+    let fallback = fake.harness("script_bootstrap.gd", &["--import"]);
     assert!(fallback.success());
     assert_eq!(stdout(&fallback), "GDKIT_SCRIPT_STARTED\nfallback\n");
     let missing = fake.harness("script_bootstrap.gd", &["res://missing.gd"]);
@@ -222,8 +233,8 @@ fn bootstrap_specific_key_fallback_and_all_modes() {
     assert_eq!(crash.status.unwrap().code(), Some(17));
     assert!(stdout(&crash).is_empty());
     let hung = process::run(
-        &fake.spawn(&["--script", "script_bootstrap.gd", "--", "res://hang.gd"]),
-        Duration::from_millis(300),
+        &fake.harness_spawn("script_bootstrap.gd", &["res://hang.gd"]),
+        KILL_DEADLINE,
     )
     .unwrap();
     assert!(hung.timed_out);
@@ -242,11 +253,7 @@ fn delays_flush_output_before_deadline_and_before_normal_exit() {
         json!({"probe":{"delay_ms":60000,"stderr":"partial"}}).to_string(),
     )
     .unwrap();
-    let timed = process::run(
-        &fake.spawn(&["--script", "probe.gd"]),
-        Duration::from_millis(300),
-    )
-    .unwrap();
+    let timed = process::run(&fake.harness_spawn("probe.gd", &[]), KILL_DEADLINE).unwrap();
     assert!(timed.timed_out);
     assert_eq!(stderr(&timed), "partial");
     assert!(envelope(&timed).ok);
@@ -589,19 +596,25 @@ fn configured_cache_is_verbatim_for_both_import_phases_and_not_written_on_failur
 }
 
 #[test]
-fn sidecars_are_per_executable_and_env_overrides_are_per_child() {
+fn sidecars_are_per_executable_and_inherited_environment_is_ignored() {
     let first = Fake::new(json!({"probe":{"payload":{"owner":"first"}}}));
     let second = Fake::new(json!({"probe":{"payload":{"owner":"second"}}}));
-    let args = [
-        "--headless",
-        "--script",
-        "/some path/probe.gd",
-        "--",
-        "argument with spaces",
-        "--help",
-    ];
-    let a = first.spawn(&args);
-    let b = second.spawn(&args);
+    let args = |fake: &Fake| {
+        [
+            "--headless",
+            "--path",
+            fake.dir.path().to_str().unwrap(),
+            "--script",
+            "/some path/probe.gd",
+            "--",
+            "argument with spaces",
+            "--help",
+        ]
+        .map(str::to_owned)
+    };
+    let (first_args, second_args) = (args(&first), args(&second));
+    let a = first.spawn(&first_args.each_ref().map(String::as_str));
+    let b = second.spawn(&second_args.each_ref().map(String::as_str));
     let (a, b) = std::thread::scope(|scope| {
         let a = scope.spawn(|| process::run(&a, Duration::from_secs(5)).unwrap());
         let b = scope.spawn(|| process::run(&b, Duration::from_secs(5)).unwrap());
@@ -609,22 +622,127 @@ fn sidecars_are_per_executable_and_env_overrides_are_per_child() {
     });
     assert_eq!(envelope(&a).payload.unwrap()["owner"], "first");
     assert_eq!(envelope(&b).payload.unwrap()["owner"], "second");
+    // Variables a developer or CI job happens to export must not redirect a test.
     let env_log = first.dir.path().join("env log.jsonl");
-    let override_spawn = first
-        .spawn(&args)
-        .env("FAKE_GODOT_SCENARIO", "{}")
+    let inherited = first
+        .spawn(&first_args.each_ref().map(String::as_str))
+        .env("FAKE_GODOT_SCENARIO", r#"{"probe":{"mode":"crash"}}"#)
         .env("FAKE_GODOT_LOG", env_log.as_os_str());
     for _ in 0..2 {
-        let result = process::run(&override_spawn, Duration::from_secs(5)).unwrap();
-        assert_eq!(envelope(&result).payload.unwrap()["major"], 4);
+        let result = process::run(&inherited, Duration::from_secs(5)).unwrap();
+        assert!(result.success());
+        assert_eq!(envelope(&result).payload.unwrap()["owner"], "first");
     }
-    for (path, count) in [(&first.log, 1), (&second.log, 1), (&env_log, 2)] {
-        let log = fs::read_to_string(path).unwrap();
+    assert!(!env_log.exists());
+    for (fake, args, count) in [(&first, &first_args, 3), (&second, &second_args, 1)] {
+        let log = fs::read_to_string(&fake.log).unwrap();
         assert_eq!(log.lines().count(), count);
         for line in log.lines() {
             assert_eq!(serde_json::from_str::<Value>(line).unwrap(), json!(args));
         }
     }
+}
+
+#[test]
+fn probe_requires_project_godot_and_probe_tres_like_godot() {
+    for missing in ["project.godot", "probe.tres"] {
+        // A payload override does not bypass the workspace requirement.
+        for scenario in [
+            json!({}),
+            json!({"probe":{"payload":{"major":4}, "exit":0}}),
+        ] {
+            let fake = Fake::new(scenario);
+            fs::remove_file(fake.dir.path().join(missing)).unwrap();
+            let result = fake.harness("probe.gd", &[]);
+            assert_eq!(result.status.unwrap().code(), Some(1), "{missing}");
+            let result = envelope(&result);
+            assert!(!result.ok);
+            assert!(result.payload.is_none());
+            assert_eq!(result.error.unwrap().stage, "resource");
+        }
+    }
+    // A directory is not a loadable resource either.
+    let fake = Fake::new(json!({}));
+    fs::remove_file(fake.dir.path().join("probe.tres")).unwrap();
+    fs::create_dir(fake.dir.path().join("probe.tres")).unwrap();
+    assert_eq!(
+        fake.harness("probe.gd", &[]).status.unwrap().code(),
+        Some(1)
+    );
+    // Without --path the probe runs in the current directory, which is no probe workspace.
+    let result = fake.run(&["--headless", "--script", "probe.gd"]);
+    assert_eq!(envelope(&result).error.unwrap().stage, "resource");
+}
+
+#[test]
+fn import_scan_without_editor_fails_like_godot_and_writes_no_cache() {
+    let fake = Fake::new(json!({}));
+    fs::write(fake.dir.path().join("files.json"), "[]").unwrap();
+    let path = fake.dir.path().to_str().unwrap();
+    let without_editor = |user_args: &[&str]| {
+        let mut args = vec![
+            "--headless",
+            "--path",
+            path,
+            "--script",
+            "import_scan.gd",
+            "--",
+        ];
+        args.extend_from_slice(user_args);
+        fake.run(&args)
+    };
+    assert_input_error(&without_editor(&["files.json"]), "editor", None);
+    assert!(!fake.cache().exists());
+    // Like the real harness, argument and manifest errors are reported first.
+    assert_input_error(&without_editor(&[]), "arguments", None);
+    assert_input_error(
+        &without_editor(&["missing.json"]),
+        "manifest",
+        Some("missing.json"),
+    );
+    // A payload override does not bypass the --editor requirement.
+    fs::write(
+        &fake.scenario,
+        json!({"import_scan":{"payload":{"scanned":0,"recognized_extensions":[]}}}).to_string(),
+    )
+    .unwrap();
+    assert_input_error(&without_editor(&["files.json"]), "editor", None);
+    assert!(!fake.cache().exists());
+    // `--editor` after `--` is a user argument, not an engine flag.
+    assert_input_error(&without_editor(&["--editor"]), "editor", None);
+    let scan = fake.harness("import_scan.gd", &["files.json"]);
+    assert!(scan.success(), "{}", stderr(&scan));
+    assert!(fake.cache().exists());
+}
+
+#[test]
+fn script_bootstrap_requires_exactly_one_user_argument_like_godot() {
+    for mode in ["envelope", "hang"] {
+        let fake = Fake::new(json!({
+            "script_bootstrap": {"mode": mode, "stdout": "user output\n"},
+            "script_bootstrap:res://a.gd": {"mode": mode, "stdout": "user output\n"}
+        }));
+        for user_args in [
+            vec![],
+            vec!["res://a.gd", "res://b.gd"],
+            vec!["res://a.gd", ""],
+        ] {
+            // A hanging scenario must still fail promptly: the script never started.
+            let result = process::run(
+                &fake.harness_spawn("script_bootstrap.gd", &user_args),
+                KILL_DEADLINE,
+            )
+            .unwrap();
+            assert!(!result.timed_out, "{mode} {user_args:?}");
+            assert_input_error(&result, "arguments", None);
+            assert!(!stdout(&result).contains("GDKIT_SCRIPT_STARTED"));
+            assert!(!stdout(&result).contains("user output"));
+        }
+    }
+    let fake = Fake::new(json!({}));
+    let result = fake.harness("script_bootstrap.gd", &["res://a.gd"]);
+    assert!(result.success());
+    assert_eq!(stdout(&result), "GDKIT_SCRIPT_STARTED\n");
 }
 
 #[test]

@@ -47,14 +47,18 @@ in the editor, audits the generated class cache, and loads eligible entries from
 a full-file inventory in a fresh runtime process. Eligibility uses the union of
 editor and runtime loader registries, including imported assets and custom runtime
 loaders, rather than a fixed extension list. Copies include source assets but
-exclude `.godot` and `.git`; no source cache is seeded. Authored files and source
-import caches are untouched; probe metadata and reports live under `.godot/gdkit`.
+exclude `.godot` and `.git` (matched case-insensitively) and directories marked
+with `.gdignore`; no source cache is seeded. Authored files and source import
+caches are untouched; probe metadata and reports live under `.godot/gdkit`.
 
 `--static-only` is the sub-second version for the inner loop. `--baseline`
 diffs against a previous report by diagnostic identity (message and resource,
-not line). Carried static findings permit engine validation but retain their
-failures and final failed verdict; new static findings block engine phases.
-`baseline.new` helps prioritize changes, not waive existing failures.
+not line; paths from the disposable copy are rewritten to `res://`). Matching
+counts occurrences: a second copy of a baselined finding is new. Carried static
+findings permit engine validation but retain their failures and final failed
+verdict; new static findings block engine phases. `baseline.new` helps
+prioritize changes, not waive existing failures. A baseline from a different
+`schema_version` is rejected (exit 2).
 
 What the agent reads from the report:
 
@@ -74,7 +78,9 @@ before declaring done. `--slice` is what makes the loop fast: one script in a
 few seconds instead of the whole project in a minute. A slice has no autoloads
 or project settings unless `project.godot` is sliced in, so a missing global is
 a real diagnostic there, and the agent knows to widen the slice rather than
-"fix" the script.
+"fix" the script. Slice entries are project-relative (`./` is accepted) and must
+exist; a typo is a usage error (exit 2), never a vacuous pass. Each sliced file
+brings its `.uid` and `.import` sidecars.
 
 `incomplete` is distinct from `failed` on purpose. It means the engine did not
 report completion (crash, timeout, malformed output). The agent should not treat
@@ -175,8 +181,11 @@ working, the way it would write a `println!` test, and deletes them after.
 
 The bootstrap emits `GDKIT_SCRIPT_STARTED` before handing off to the script,
 not a success envelope. The script must call `quit` before its deadline; success
-requires the marker, a clean exit, and no error diagnostics. A marker followed by
-a hang is a timeout, not a pass.
+requires the marker, a clean exit, and no error diagnostics. Engine shutdown
+leak reports (leaked ObjectDB instances, resources still in use, RIDs) are
+reported with `is_shutdown_noise` but do not fail the script. A marker followed
+by a hang is a timeout, not a pass. The script may use `_init`, `_initialize`,
+or `_process`; `_initialize` is only called when the script defines it.
 
 The report's `phases[]` entry for the script carries `outcome`
 (`completed | failed | timed_out | skipped`), diagnostics, and raw-stream artifact
@@ -224,7 +233,9 @@ vs `"ui_accept"`; `settings layers` makes collision masks readable.
 gdkit doctor
 ```
 
-Which engine will be used and why (`--godot`, `GDKIT_GODOT`, or `gdkit.toml`),
+Which engine will be used and why (`--godot`, `GDKIT_GODOT`, or `gdkit.toml`, in
+that order; a bare name such as `godot` is looked up on `PATH`, and an empty
+`GDKIT_GODOT` counts as unset),
 its version, whether the probe cache is warm, the project's warning policy,
 which sessions are recorded and whether any record is corrupt. Thirty seconds
 here saves the twenty minutes an agent otherwise spends debugging a wrong

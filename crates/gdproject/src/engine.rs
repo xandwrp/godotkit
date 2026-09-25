@@ -1,12 +1,14 @@
 //! An engine executable that has passed the compatibility probe.
 //!
 //! The probe result is cached per project under the engine's identity
-//! (path, size, mtime, companion binary on Windows, and a hash of the harness
-//! sources) so a rebuilt engine or a changed harness re-probes automatically.
+//! (path, size, mtime, on Unix also device, inode and ctime, companion binary on
+//! Windows, and a hash of the harness sources) so a rebuilt engine or a changed
+//! harness re-probes automatically.
 //!
 //! # Tests (tests/engine.rs, offline with `fake-godot`)
 //! - `attach_probes_once_then_hits_cache`
 //! - `cache_misses_when_engine_size_or_mtime_or_harness_hash_changes`
+//! - `cache_misses_when_engine_is_replaced_with_same_size_and_mtime` (Unix)
 //! - `cache_is_not_written_when_probe_fails_or_engine_changes_mid_probe`
 //! - `probe_rejects_engines_missing_headless_editor_flags`
 //! - `probe_rejects_non_editor_or_non_4x_builds`
@@ -43,6 +45,11 @@ pub struct TrackedFile {
     pub path: PathBuf,
     pub size: u64,
     pub modified_unix_ns: u128,
+    /// Unix only: a replaced file gets a new inode and ctime, which, unlike
+    /// mtime, `cp -p`, `touch -r` and archive extraction cannot restore.
+    pub device: Option<u64>,
+    pub inode: Option<u64>,
+    pub changed_unix_ns: Option<i128>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -66,10 +73,11 @@ impl Engine {
         deadline: Duration,
     ) -> crate::Result<(Engine, bool)> {
         let key = key_for(&selection.executable)?;
-        if let Ok(record) = read_cache(workspace) {
-            if record.key == key && record.report.compatible() {
-                return Ok((engine(selection, &key, record.report.version)?, true));
-            }
+        if let Ok(record) = read_cache(workspace)
+            && record.key == key
+            && record.report.compatible()
+        {
+            return Ok((engine(selection, &key, record.report.version)?, true));
         }
         let report = probe(&selection.executable, deadline)?;
         ensure_unchanged(&selection.executable, &key)?;
@@ -168,6 +176,10 @@ fn engine(selection: &EngineSelection, key: &ProbeKey, version: String) -> crate
     })
 }
 
+/// Cheap metadata identity of the engine binary (never a content hash of a
+/// ~100 MB executable). It cannot see through indirection it does not open: a
+/// wrapper script or launcher at a fixed path that execs a different engine
+/// keeps its own metadata unchanged, so such a swap is not detected.
 pub fn probe_key(executable: &Path) -> std::io::Result<ProbeKey> {
     fn track(path: &Path) -> std::io::Result<TrackedFile> {
         let path = fs::canonicalize(path)?;
@@ -183,10 +195,27 @@ pub fn probe_key(executable: &Path) -> std::io::Result<ProbeKey> {
             .duration_since(UNIX_EPOCH)
             .map_err(std::io::Error::other)?
             .as_nanos();
+        #[cfg(unix)]
+        let (device, inode, changed_unix_ns) = {
+            use std::os::unix::fs::MetadataExt;
+            (
+                Some(metadata.dev()),
+                Some(metadata.ino()),
+                Some(
+                    i128::from(metadata.ctime()) * 1_000_000_000
+                        + i128::from(metadata.ctime_nsec()),
+                ),
+            )
+        };
+        #[cfg(not(unix))]
+        let (device, inode, changed_unix_ns) = (None, None, None);
         Ok(TrackedFile {
             path,
             size: metadata.len(),
             modified_unix_ns,
+            device,
+            inode,
+            changed_unix_ns,
         })
     }
     let files = vec![track(executable)?];
@@ -305,7 +334,7 @@ pub fn probe(executable: &Path, deadline: Duration) -> crate::Result<ProbeReport
         }
     }
     let scratch = crate::workspace::IsolatedCopy::empty()?;
-    let resource = scratch.path.join("probe.tres");
+    let resource = scratch.path().join("probe.tres");
     fs::write(
         &resource,
         b"[gd_resource type=\"Resource\" format=3]\n\n[resource]\n",
@@ -320,7 +349,7 @@ pub fn probe(executable: &Path, deadline: Duration) -> crate::Result<ProbeReport
         fingerprint: String::new(),
         source: crate::config::SelectionSource::CommandLine,
     };
-    let invocation = Invocation::new(&candidate, &scratch.path, remaining(&output)?);
+    let invocation = Invocation::new(&candidate, scratch.path(), remaining(&output)?);
     let run = crate::runner::run_harness_captured::<ProbeReport>(&invocation, Harness::Probe)?;
     output.extend(run.captured.lines_text().map(|line| line.into_owned()));
     let envelope = run

@@ -1,5 +1,7 @@
 // Drives the built binary. Engine tests explicitly build gdproject's fake-godot
-// once into an isolated target directory (offline, with a three-minute deadline).
+// once per test process into a dedicated target directory under
+// CARGO_TARGET_TMPDIR (offline, with a three-minute deadline). That directory is
+// reused across runs, so nothing leaks into /tmp and rebuilds are incremental.
 // This works for both `cargo test -p gdkit` and `cargo test --workspace`, without
 // relying on Cargo building dependency binaries or a pre-existing sibling binary.
 // Every test copies the executable and its scenario; no process-global env changes.
@@ -215,46 +217,66 @@ fn init_writes_config_and_refuses_to_overwrite() {
     todo!()
 }
 
+/// Path of the fake engine executable. A failed build is cached, so every
+/// later caller fails fast with the same message instead of rebuilding.
 fn fake_binary() -> &'static Path {
-    static BUILD: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    let dir = BUILD.get_or_init(|| {
-        let dir = tempfile::tempdir().unwrap();
-        let log = fs::File::create(dir.path().join("build.log")).unwrap();
-        let mut child = Command::new(env!("CARGO"))
-            .args(["build", "--offline", "--locked", "--manifest-path"])
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdproject/Cargo.toml"))
-            .args([
-                "--features",
-                "test-engine",
-                "--bin",
-                "fake-godot",
-                "--target-dir",
-            ])
-            .arg(dir.path())
-            .stdout(log.try_clone().unwrap())
-            .stderr(log)
-            .spawn()
-            .unwrap();
-        let started = std::time::Instant::now();
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                assert!(
-                    status.success(),
-                    "fake engine build failed: {}",
-                    fs::read_to_string(dir.path().join("build.log")).unwrap()
-                );
-                break;
-            }
-            if started.elapsed() > std::time::Duration::from_secs(180) {
-                child.kill().unwrap();
-                child.wait().unwrap();
-                panic!("fake engine build exceeded 180 seconds");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+    static BUILD: std::sync::OnceLock<Result<std::path::PathBuf, String>> =
+        std::sync::OnceLock::new();
+    match BUILD.get_or_init(build_fake_binary) {
+        Ok(path) => path,
+        Err(message) => panic!("{message}"),
+    }
+}
+
+fn build_fake_binary() -> Result<std::path::PathBuf, String> {
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fake-godot-target");
+    fs::create_dir_all(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+    let messages = target.join("build.json");
+    let log = target.join("build.log");
+    let file = |path: &Path| fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()));
+    let mut child = Command::new(env!("CARGO"))
+        .args(["build", "--offline", "--locked", "--manifest-path"])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdproject/Cargo.toml"))
+        .args([
+            "--features",
+            "test-engine",
+            "--bin",
+            "fake-godot",
+            "--message-format",
+            "json",
+            "--target-dir",
+        ])
+        .arg(&target)
+        // An inherited cross target would move the output and build for the wrong host.
+        .env_remove("CARGO_BUILD_TARGET")
+        .stdout(file(&messages)?)
+        .stderr(file(&log)?)
+        .spawn()
+        .map_err(|e| format!("spawn fake engine build: {e}"))?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
         }
-        dir
-    });
-    dir.path()
+        if started.elapsed() > std::time::Duration::from_secs(180) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("fake engine build exceeded 180 seconds".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let log = fs::read_to_string(&log).unwrap_or_default();
+    if !status.success() {
+        return Err(format!("fake engine build failed ({status}): {log}"));
+    }
+    // Ask Cargo where it put the binary rather than assuming a profile layout.
+    fs::read_to_string(&messages)
+        .map_err(|e| e.to_string())?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == "fake-godot")
+        .find_map(|m| m["executable"].as_str().map(std::path::PathBuf::from))
+        .ok_or_else(|| format!("fake engine build reported no executable: {log}"))
 }
 
 fn copy_executable(source: &Path, destination: &Path) {
@@ -285,12 +307,7 @@ impl Fake {
         let executable = dir
             .path()
             .join(format!("godot{}", std::env::consts::EXE_SUFFIX));
-        copy_executable(
-            &fake_binary()
-                .join("debug")
-                .join(format!("fake-godot{}", std::env::consts::EXE_SUFFIX)),
-            &executable,
-        );
+        copy_executable(fake_binary(), &executable);
         fs::write(
             format!("{}.scenario.json", executable.display()),
             scenario.to_string(),
@@ -312,6 +329,14 @@ impl Fake {
 
     fn log(&self) -> String {
         fs::read_to_string(format!("{}.log", self.executable.display())).unwrap()
+    }
+
+    /// The log since the last call, so assertions see only the latest runs.
+    fn take_log(&self) -> String {
+        let path = format!("{}.log", self.executable.display());
+        let log = fs::read_to_string(&path).unwrap_or_default();
+        let _ = fs::remove_file(&path);
+        log
     }
 }
 
@@ -407,7 +432,7 @@ fn engine_selection_and_strict_policy_follow_flag_env_config_precedence() {
         dir.path().join("gdkit.toml"),
         format!(
             "[engine]\nexecutable = {:?}\n[check]\nstrict_methods = true\n",
-            name.to_str().unwrap()
+            format!("./{}", name.to_str().unwrap())
         ),
     )
     .unwrap();
@@ -418,9 +443,10 @@ fn engine_selection_and_strict_policy_follow_flag_env_config_precedence() {
         0,
         "passed",
     );
+    let canonical = |path: &serde_json::Value| fs::canonicalize(path.as_str().unwrap()).unwrap();
     assert_eq!(
-        value["engine"]["executable"],
-        fs::canonicalize(&local).unwrap().to_str().unwrap()
+        canonical(&value["engine"]["executable"]),
+        fs::canonicalize(&local).unwrap()
     );
     assert_eq!(value["policy"]["strict_methods"], true);
     let value = report(
@@ -433,14 +459,16 @@ fn engine_selection_and_strict_policy_follow_flag_env_config_precedence() {
         "passed",
     );
     assert_eq!(
-        value["engine"]["executable"],
-        fake.executable.to_str().unwrap()
+        canonical(&value["engine"]["executable"]),
+        fs::canonicalize(&fake.executable).unwrap()
     );
     fs::write(
         dir.path().join("gdkit.toml"),
         "[check]\nstrict_methods = false\n",
     )
     .unwrap();
+    // Earlier runs already logged strict-methods; judge only the next run.
+    fake.take_log();
     let value = report(
         &fake
             .command(dir.path())
@@ -454,7 +482,9 @@ fn engine_selection_and_strict_policy_follow_flag_env_config_precedence() {
         "passed",
     );
     assert_eq!(value["policy"]["strict_methods"], true);
-    assert!(fake.log().contains("strict-methods"));
+    let log = fake.take_log();
+    assert!(log.contains("\"strict-methods\""), "{log}");
+    assert!(!log.contains("\"project-policy\""), "{log}");
     let value = report(
         &fake
             .command(dir.path())
@@ -465,7 +495,9 @@ fn engine_selection_and_strict_policy_follow_flag_env_config_precedence() {
         "passed",
     );
     assert_eq!(value["policy"]["strict_methods"], false);
-    assert!(fake.log().contains("project-policy"));
+    let log = fake.take_log();
+    assert!(log.contains("\"project-policy\""), "{log}");
+    assert!(!log.contains("\"strict-methods\""), "{log}");
 }
 
 #[test]
@@ -626,7 +658,13 @@ fn static_scripts_and_invalid_setup_are_rejected() {
         vec!["--static-only", "--script", "res://test.gd"],
         vec!["--static-only", "--baseline", "bad.json"],
         vec!["--static-only", "--script-timeout", "0"],
+        vec!["--static-only", "--phase-timeout", "0"],
+        vec!["--phase-timeout", "0"],
+        vec!["--phase-timeout", "86401"],
         vec!["--script", "../escape.gd"],
+        // A slice that does not exist is a usage error, not a vacuous pass.
+        vec!["--static-only", "--slice", "typo.gd"],
+        vec!["--slice", "typo.gd"],
     ] {
         let mut args = vec!["check", "--project", root, "--output", "json"];
         args.extend(extra);
@@ -652,4 +690,121 @@ fn static_scripts_and_invalid_setup_are_rejected() {
             .code(),
         Some(2)
     );
+}
+
+#[test]
+fn baseline_schema_mismatch_is_a_tool_error_and_foreign_project_warns() {
+    let dir = project(&[MISSING_PRELOAD]);
+    let root = dir.path().to_str().unwrap();
+    let before = gdkit(&[
+        "check",
+        "--static-only",
+        "--project",
+        root,
+        "--output",
+        "json",
+    ]);
+    let mut value: serde_json::Value = serde_json::from_slice(&before.stdout).unwrap();
+    let baseline = dir.path().join("baseline.json");
+    for version in [serde_json::json!(2), serde_json::Value::Null] {
+        value["schema_version"] = version;
+        fs::write(&baseline, value.to_string()).unwrap();
+        let output = gdkit(&[
+            "check",
+            "--static-only",
+            "--project",
+            root,
+            "--baseline",
+            baseline.to_str().unwrap(),
+        ]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.starts_with("error: ") && stderr.contains("schema_version"),
+            "{stderr}"
+        );
+    }
+    // A report from another project is still usable, with a warning.
+    let other = project(&[]);
+    fs::write(&baseline, &before.stdout).unwrap();
+    let output = gdkit(&[
+        "check",
+        "--static-only",
+        "--project",
+        other.path().to_str().unwrap(),
+        "--output",
+        "json",
+        "--baseline",
+        baseline.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.starts_with("warning: ") && stderr.contains("recorded for project"),
+        "{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["baseline"]["resolved"].as_array().unwrap().len(), 1);
+    // The same project does not warn.
+    let output = gdkit(&[
+        "check",
+        "--static-only",
+        "--project",
+        root,
+        "--output",
+        "json",
+        "--baseline",
+        baseline.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn human_summary_counts_engine_failures() {
+    let fake = Fake::new(serde_json::json!({"check": {"stderr": "ERROR: engine problem\n"}}));
+    let dir = project(&[("one.gd", "extends Node\n")]);
+    let output = fake.command(dir.path()).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let summary = stdout.lines().last().unwrap();
+    assert!(
+        summary.starts_with("check FAILED: 1 failure(s) (0 static finding(s))"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn missing_slice_is_rejected_before_the_engine_is_probed() {
+    let fake = Fake::new(serde_json::json!({}));
+    let dir = project(&[("one.gd", "extends Node\n")]);
+    let output = fake
+        .command(dir.path())
+        .args(["--slice", "./typo.gd"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.starts_with("error: ") && stderr.contains("typo.gd"),
+        "{stderr}"
+    );
+    assert!(fake.take_log().is_empty(), "engine ran before validation");
+    // A `./` spelling of an existing path is normalized and checked in the engine.
+    let value = report(
+        &fake
+            .command(dir.path())
+            .args(["--output", "json", "--slice", "./one.gd"])
+            .output()
+            .unwrap(),
+        0,
+        "passed",
+    );
+    assert_eq!(value["project"]["sliced"], true);
 }

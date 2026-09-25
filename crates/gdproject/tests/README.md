@@ -6,14 +6,18 @@ Two tiers, by file:
   `env!("CARGO_BIN_EXE_fake-godot")`) or process subjects such as `sleep`/`cmd`.
   Engine-facing tests copy the executable per test and use
   `<executable>.scenario.json` and `<executable>.log` sidecars, avoiding
-  process-global environment mutation. The fake also supports explicit
-  `FAKE_GODOT_SCENARIO` (inline JSON) and `FAKE_GODOT_LOG` overrides.
-- Engine: `#[ignore = "requires GDKIT_TEST_GODOT"]`; prefixed `real_engine_`.
-  Implemented check tests exercise actual harness behavior, including autoloads,
-  strict methods, timeouts, imported assets, and runtime custom loaders. Fixtures
-  start from clean source copies, without seeding `.godot` caches. Other modules
-  still contain scaffold or deferred tests; an ignored test is not necessarily
-  an implemented engine test or golden-fixture refresh.
+  process-global environment mutation. The fake has no environment overrides,
+  so inherited variables cannot change a test. It enforces the real harnesses'
+  invocation contracts (probe workspace files, `--editor` for ImportScan, one
+  ScriptBootstrap argument) even when a scenario overrides the payload.
+- Engine: `#[ignore = "requires GDKIT_TEST_GODOT"]` (or the `engine.rs`
+  opt-in label); prefixed `real_engine_`. These are implemented and exercise
+  actual harness behavior, including autoloads, strict methods, timeouts,
+  imported assets, and runtime custom loaders. Fixtures start from clean source
+  copies, without seeding `.godot` caches.
+- Scaffold: `#[ignore = "scaffold"]` bodies are `todo!()`, including
+  `real_engine_` names in modules that are not implemented yet. They are an
+  acceptance checklist, not engine coverage; `--ignored` runs will panic on them.
 
 Runtime verification is on Linux. macOS shares the POSIX process-group code but
 is not runtime-verified here. Windows supports direct-child cleanup; Job objects

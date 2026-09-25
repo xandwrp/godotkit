@@ -11,13 +11,19 @@
 //! - `parse_envelope_rejects_protocol_version_mismatch_before_payload_decode`
 //! - `error_envelopes_surface_stage_and_message`
 //! - `documented_variant_json_shapes_survive_envelope_transport`
-//!
 //! - `engine_golden_variant_payload_survives_envelope_transport`
+//! - `engine_golden_cases_decode_and_reencode_identically`
 //!
-//! The frozen engine-produced `tests/fixtures/protocol_golden.json` covers
-//! envelope decoding and lossless JSON payload transport offline. It does not
-//! exercise the current engine encoder or claim `gdview::variant` decoding
-//! compatibility.
+//!   Engine (`#[ignore]`, GDKIT_TEST_GODOT):
+//! - `real_engine_protocol_gd_matches_golden_fixture` (set GDKIT_REFRESH_GOLDEN
+//!   to rewrite the fixture and its spike copy from engine output)
+//! - `real_engine_protocol_gd_rejects_cycles_budgets_and_non_canonical_input`
+//!
+//! `tests/fixtures/protocol_golden.json` is `protocol.gd`'s encoding of every
+//! contract case, produced by the real-engine test. Offline, every case must
+//! decode with `gdview::variant` and re-encode to identical JSON, so the two
+//! codecs are tested against each other. Harness output escapes control
+//! characters, which Godot's `JSON.stringify` writes raw.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

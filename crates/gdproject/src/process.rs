@@ -20,6 +20,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 compile_error!("gdproject::process supports Linux, macOS, and Windows only");
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// Longest wait for the leader to exit after a hard kill. A leader stuck in
+/// uninterruptible I/O can outlive SIGKILL; it is then left unreaped.
+pub const KILL_REAP_LIMIT: Duration = Duration::from_secs(5);
 
 /// Combined stdout/stderr payload limit, including pending unterminated lines.
 /// Allocator capacity and record metadata are additional, bounded overhead.
@@ -102,6 +105,8 @@ impl OutputLine {
 #[derive(Debug)]
 pub struct Captured {
     pub pid: u32,
+    /// `None` only when the leader was still alive [`KILL_REAP_LIMIT`] after
+    /// a timeout or output-limit hard kill, so no exit status exists.
     pub status: Option<ExitStatus>,
     pub timed_out: bool,
     /// Capture exceeded the byte or record budget. Output is incomplete and the
@@ -144,6 +149,9 @@ impl Captured {
 /// the group, preserves the bounded prefix, and sets `output_limit_exceeded`;
 /// it is not a timeout or a successful run. Exactly filling a budget is allowed.
 /// Vec capacity growth and per-record allocations add bounded memory overhead.
+/// Group cleanup after the leader exits is best effort and never discards
+/// capture. After a hard kill the leader is awaited for at most
+/// [`KILL_REAP_LIMIT`]; if it survives, `status` is `None`.
 pub fn run(spawn: &Spawn, deadline: Duration) -> io::Result<Captured> {
     let started = Instant::now();
     let child = spawn
@@ -164,16 +172,13 @@ pub fn run(spawn: &Spawn, deadline: Duration) -> io::Result<Captured> {
         let a = out.drain(&mut stdout, &mut lines, &mut budget)?;
         let b = err.drain(&mut stderr, &mut lines, &mut budget)?;
         if budget.exceeded {
-            guard.kill_tree()?;
-            break (guard.child.wait()?, false);
+            break (guard.kill_and_reap()?, false);
         }
         if let Some(status) = guard.try_wait()? {
-            guard.kill_tree()?;
-            break (status, false);
+            break (Some(status), false);
         }
         if started.elapsed() >= deadline {
-            guard.kill_tree()?;
-            break (guard.child.wait()?, true);
+            break (guard.kill_and_reap()?, true);
         }
         if !a && !b {
             std::thread::sleep(POLL_INTERVAL.min(deadline.saturating_sub(started.elapsed())));
@@ -193,7 +198,7 @@ pub fn run(spawn: &Spawn, deadline: Duration) -> io::Result<Captured> {
     err.finish(&mut lines);
     Ok(Captured {
         pid: guard.pid,
-        status: Some(status),
+        status,
         timed_out,
         output_limit_exceeded: budget.exceeded,
         lines,
@@ -307,7 +312,11 @@ pub fn spawn(spawn: &Spawn, log: &Path) -> io::Result<ChildGuard> {
 pub struct ChildGuard {
     pid: u32,
     child: Child,
-    cleaned: bool,
+    /// Set once the leader is reaped. The group is never signalled afterwards:
+    /// only the unreaped leader pins its process-group ID against reuse.
+    status: Option<ExitStatus>,
+    /// The leader outlived [`KILL_REAP_LIMIT`] after SIGKILL; drop won't wait again.
+    unresponsive: bool,
     // Fields drop after our Drop body has killed and reaped the child.
     retained: Vec<Box<dyn Send>>,
 }
@@ -327,7 +336,8 @@ impl ChildGuard {
         Self {
             pid: child.id(),
             child,
-            cleaned: false,
+            status: None,
+            unresponsive: false,
             retained: Vec::new(),
         }
     }
@@ -341,57 +351,92 @@ impl ChildGuard {
         self.pid
     }
     /// Polls without waiting. Once the leader exits, also kills remaining group
-    /// members rather than retaining a stale group ID until a later drop.
+    /// members (best effort) before reaping it, rather than retaining a group ID
+    /// that could be reused by the time of a later drop.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        let status = self.child.try_wait()?;
-        if status.is_some() {
-            self.kill_tree()?;
+        if self.status.is_none() && platform::exited(&mut self.child)? {
+            // The zombie leader still pins the group ID, so this cannot reach
+            // an unrelated group. Failure must not lose the exit: a zombie-only
+            // group may reject signals (EPERM on macOS), and ESRCH is benign.
+            let _ = platform::kill_tree(&mut self.child);
+            self.status = Some(self.child.wait()?);
         }
-        Ok(status)
+        Ok(self.status)
     }
-    fn kill_tree(&mut self) -> io::Result<()> {
-        if !self.cleaned {
-            #[cfg(unix)]
-            platform::signal(self.pid, 9)?;
-            #[cfg(windows)]
-            if self.child.try_wait()?.is_none() {
-                self.child.kill()?;
-            }
-            self.cleaned = true;
+    /// Hard-kills the tree, then waits at most [`KILL_REAP_LIMIT`] for the
+    /// leader. `None` means it is still alive and deliberately left unreaped.
+    fn kill_and_reap(&mut self) -> io::Result<Option<ExitStatus>> {
+        if self.status.is_some() {
+            return Ok(self.status);
         }
-        Ok(())
+        if let Err(error) = platform::kill_tree(&mut self.child) {
+            // Reaping only needs the leader gone; fall back to it alone.
+            if !platform::exited(&mut self.child)? && self.child.kill().is_err() {
+                return Err(error);
+            }
+        }
+        let started = Instant::now();
+        loop {
+            if let Some(status) = self.try_wait()? {
+                return Ok(Some(status));
+            }
+            if started.elapsed() >= KILL_REAP_LIMIT {
+                self.unresponsive = true;
+                return Ok(None);
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
     }
     /// SIGTERM then SIGKILL after `grace` on Unix; immediate direct-child kill
-    /// on Windows. Always reaps the direct child. Idempotent after completion.
+    /// on Windows. Reaps the direct child, waiting at most [`KILL_REAP_LIMIT`]
+    /// after the hard kill. A leader that survives that (e.g. stuck in
+    /// uninterruptible I/O) yields a `TimedOut` error and stays unreaped; drop
+    /// then kills and polls once more without blocking. Idempotent after completion.
     pub fn terminate(&mut self, grace: Duration) -> io::Result<TerminateOutcome> {
         if self.try_wait()?.is_some() {
-            self.kill_tree()?;
             return Ok(TerminateOutcome::AlreadyExited);
         }
         #[cfg(unix)]
         {
-            platform::signal(self.pid, 15)?;
+            if let Err(error) = platform::signal(self.pid, libc::SIGTERM) {
+                // The leader may have exited since the poll above.
+                if !platform::exited(&mut self.child)? {
+                    return Err(error);
+                }
+            }
             let started = Instant::now();
             while started.elapsed() < grace {
                 if self.try_wait()?.is_some() {
-                    self.kill_tree()?;
                     return Ok(TerminateOutcome::Exited);
                 }
                 std::thread::sleep(POLL_INTERVAL.min(grace.saturating_sub(started.elapsed())));
             }
         }
-        self.kill_tree()?;
-        self.child.wait()?;
-        Ok(TerminateOutcome::Killed)
+        match self.kill_and_reap()? {
+            Some(_) => Ok(TerminateOutcome::Killed),
+            None => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "process {} did not exit within {KILL_REAP_LIMIT:?} of being killed",
+                    self.pid
+                ),
+            )),
+        }
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        let _ = self.kill_tree();
-        // Even if group signalling failed, make a best effort to reap the child.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if self.status.is_some() {
+            return;
+        }
+        if self.unresponsive {
+            // Already waited once in vain; retry without blocking again.
+            let _ = platform::kill_tree(&mut self.child);
+            let _ = self.try_wait();
+        } else {
+            let _ = self.kill_and_reap();
+        }
     }
 }
 
@@ -400,22 +445,16 @@ mod platform {
     use super::*;
     use std::os::fd::AsRawFd;
 
-    // Small POSIX surface avoids introducing a dependency solely for these calls.
-    unsafe extern "C" {
-        fn kill(pid: i32, signal: i32) -> i32;
-        fn fcntl(fd: i32, command: i32, ...) -> i32;
-    }
     pub trait Pipe: Read + AsRawFd {}
     impl<T: Read + AsRawFd> Pipe for T {}
 
     pub fn prepare(pipe: &impl Pipe) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
-        const NONBLOCK: i32 = 0x800;
-        #[cfg(target_os = "macos")]
-        const NONBLOCK: i32 = 0x4;
         // SAFETY: the pipe owns a live descriptor; F_GETFL/F_SETFL take these args.
-        let flags = unsafe { fcntl(pipe.as_raw_fd(), 3) };
-        if flags == -1 || unsafe { fcntl(pipe.as_raw_fd(), 4, flags | NONBLOCK) } == -1 {
+        let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+        if flags == -1
+            || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
+                == -1
+        {
             return Err(io::Error::last_os_error());
         }
         Ok(())
@@ -423,12 +462,42 @@ mod platform {
     pub fn read(pipe: &mut impl Pipe, buffer: &mut [u8]) -> io::Result<usize> {
         pipe.read(buffer)
     }
+    /// Whether the unreaped leader has exited. WNOWAIT leaves it a zombie, so
+    /// its pid (and therefore its group ID) stays reserved until `wait` reaps it.
+    pub fn exited(child: &mut Child) -> io::Result<bool> {
+        loop {
+            // SAFETY: all-zero is a valid siginfo_t; waitid only writes into it.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: a valid out-pointer and a child pid this process has not reaped.
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    child.id() as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == 0 {
+                // POSIX: with WNOHANG and nothing waitable, si_pid stays zero.
+                // SAFETY: si_pid is valid for the zeroed or SIGCHLD-filled info.
+                return Ok(unsafe { info.si_pid() } != 0);
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    /// Callers must not use this after the leader was reaped.
+    pub fn kill_tree(child: &mut Child) -> io::Result<()> {
+        signal(child.id(), libc::SIGKILL)
+    }
     pub fn signal(pid: u32, signal: i32) -> io::Result<()> {
         // SAFETY: negative pid targets the process group created during spawn.
-        if unsafe { kill(-(pid as i32), signal) } == -1 {
+        if unsafe { libc::kill(-(pid as libc::pid_t), signal) } == -1 {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(3) {
-                // ESRCH: group already gone.
+            // ESRCH: group already gone.
+            if error.raw_os_error() != Some(libc::ESRCH) {
                 return Err(error);
             }
         }
@@ -456,6 +525,17 @@ mod platform {
     pub trait Pipe: Read + AsRawHandle {}
     impl<T: Read + AsRawHandle> Pipe for T {}
     pub fn prepare(_: &impl Pipe) -> io::Result<()> {
+        Ok(())
+    }
+    /// The owned process handle keeps the pid reserved, so polling may reap.
+    pub fn exited(child: &mut Child) -> io::Result<bool> {
+        Ok(child.try_wait()?.is_some())
+    }
+    /// Direct child only; see the module docs.
+    pub fn kill_tree(child: &mut Child) -> io::Result<()> {
+        if child.try_wait()?.is_none() {
+            child.kill()?;
+        }
         Ok(())
     }
     pub fn read(pipe: &mut impl Pipe, buffer: &mut [u8]) -> io::Result<usize> {

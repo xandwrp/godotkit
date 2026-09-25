@@ -50,7 +50,7 @@ fn game_is_always_dead_when_run_returns() {
 }
 
 #[test]
-#[ignore = "requires GDKIT_TEST_GODOT"]
+#[ignore = "scaffold"]
 fn real_engine_runs_main_scene_with_autoloads_to_a_checkpoint() {
     todo!()
 }

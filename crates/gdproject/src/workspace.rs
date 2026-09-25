@@ -8,16 +8,33 @@
 //! content edits or protects against an attacker moving an already-open directory.
 //! Staging files must be exclusively owned by the caller until publication returns.
 //!
-//! # Tests (`tests/workspace.rs`, plus private fallback/cleanup unit tests)
+//! The project root is canonical ([`Project::root`]): the user-chosen root and
+//! its ancestors are trusted, and symlink refusal applies to entries inside it.
+//!
+//! Scratch copies (`<temp>/gdkit-<unix_ms>-<pid>-<n>`) and rename-fallback
+//! staging dirs (`.gdkit-publish-<pid>-<n>`) left by a killed process are swept
+//! when a sibling of the same kind is created (Unix only): only exact-pattern
+//! directories (never links) owned by the effective uid whose pid is gone.
+//!
+//! # Tests (`tests/workspace.rs`, plus private `[unit]` tests in this file)
 //! - `open_requires_a_project_and_creates_state_dir_lazily`
+//! - `non_canonical_roots_are_trusted_but_links_inside_are_not`
 //! - `lock_is_exclusive_across_processes_and_released_on_drop`
 //! - `isolated_copy_full_excludes_dot_godot_dot_git_and_refuses_symlinks`
+//! - `copies_skip_gdignored_directories_entirely`
 //! - `isolated_copy_slice_rejects_dot_dot_absolute_and_dot_godot_and_keeps_relative_layout`
+//! - `isolated_copy_slice_brings_uid_and_import_sidecars`
+//! - `normalize_slice_path_is_the_shared_slice_rule`
 //! - `isolated_copy_is_removed_on_drop`
 //! - `artifact_dir_names_are_unique_and_sortable`
 //! - `publish_new_file_is_atomic_and_never_overwrites`
-//! - `publish_new_file_falls_back_from_hard_link_to_rename_on_filesystems_without_links`
+//! - `publish_new_file_succeeds_when_only_staging_cleanup_fails`
+//! - `publish_new_file_falls_back_from_hard_link_to_rename_on_filesystems_without_links` `[unit]`
+//! - `allocation_sweeps_only_dead_owned_scratch_dirs` `[unit]`
+//! - `rename_fallback_sweeps_dead_staging_dirs` `[unit]`
+//! - `slice_copy_refuses_scratch_inside_selected_source` `[unit]`
 
+use std::ffi::OsStr;
 #[cfg(not(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64"))))]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
@@ -37,6 +54,8 @@ pub struct Workspace {
 
 impl Workspace {
     /// Opens the project at `root` (no discovery; the CLI decides that).
+    /// The root is canonicalized, so `..`, a symlinked checkout, or a symlinked
+    /// ancestor all work; `root()` reports the canonical path.
     pub fn open(root: &Path) -> Result<Self> {
         let project = Project::open(root)?;
         let state_dir = project.root().join(".godot").join("gdkit");
@@ -123,12 +142,27 @@ impl ArtifactDir {
     }
 }
 
+const SCRATCH_PREFIX: &str = "gdkit-";
+
 /// A disposable copy of the project in the temp dir, removed on drop.
+///
+/// Drop removes only the directory this type allocated (the private
+/// `allocated`), never whatever `path` holds; the private field also makes the
+/// type impossible to construct outside this module.
 pub struct IsolatedCopy {
-    pub path: PathBuf,
+    allocated: PathBuf,
 }
 
 impl IsolatedCopy {
+    /// The scratch project root: canonical, directly under the system temp dir.
+    pub fn path(&self) -> &Path {
+        &self.allocated
+    }
+
+    fn new(allocated: PathBuf) -> Self {
+        Self { allocated }
+    }
+
     fn allocate() -> Result<Self> {
         // Canonicalize the system temp root (which itself may be an OS-managed link).
         Self::allocate_in(&std::env::temp_dir(), None)
@@ -148,19 +182,20 @@ impl IsolatedCopy {
                 )));
             }
         }
-        Ok(Self {
-            path: unique_directory(&temp, "gdkit-")?,
-        })
+        sweep_stale_scratch(&temp);
+        Ok(Self::new(unique_directory(&temp, SCRATCH_PREFIX)?))
     }
 
     /// A bare `project.godot` with `config_version=5`.
     pub fn empty() -> Result<Self> {
         let copy = Self::allocate()?;
-        write_new(&copy.path.join("project.godot"), b"config_version=5\n")?;
+        write_new(&copy.path().join("project.godot"), b"config_version=5\n")?;
         Ok(copy)
     }
-    /// Everything except `.godot` and `.git` entries at any depth.
-    /// Excluded entries are not visited; all other symlinks and special files fail.
+    /// Everything except `.godot` and `.git` entries at any depth (see
+    /// [`normalize_slice_path`] for the name match) and directories holding a
+    /// `.gdignore` file, which Godot ignores entirely. Excluded entries are not
+    /// visited; all other symlinks and special files fail.
     /// Rejects a canonical system temp root inside the project before allocating.
     pub fn full(project: &Project) -> Result<Self> {
         Self::full_in(project, &std::env::temp_dir())
@@ -169,11 +204,15 @@ impl IsolatedCopy {
     fn full_in(project: &Project, temp: &Path) -> Result<Self> {
         check_directory(project.root())?;
         let copy = Self::allocate_in(temp, Some(project))?;
-        copy_tree(project.root(), &copy.path)?;
+        copy_tree(project.root(), copy.path(), copy.path(), false)?;
         Ok(copy)
     }
     /// Only selected relative files/directories, retaining their layout, plus a
     /// minimal `project.godot` unless that file is explicitly selected.
+    /// A selected file brings its existing Godot sidecars (`<file>.uid`,
+    /// `<file>.import`). Selected directories are filtered like `full`; one that
+    /// itself holds `.gdignore` contributes nothing. Selections must already be
+    /// normalized (no `.` components; see [`normalize_slice_path`]).
     /// Like `full`, requires the canonical system temp root outside the project.
     pub fn slice(project: &Project, selections: &[PathBuf]) -> Result<Self> {
         Self::slice_in(project, selections, &std::env::temp_dir())
@@ -187,6 +226,24 @@ impl IsolatedCopy {
             let source = project.root().join(selection);
             check_ancestors(&source)?;
             paths.push(selection.clone());
+            if fs::symlink_metadata(&source)
+                .map_err(|e| io_error(&source, e))?
+                .is_file()
+            {
+                for suffix in [".uid", ".import"] {
+                    let mut sidecar = selection.as_os_str().to_owned();
+                    sidecar.push(suffix);
+                    let sidecar = PathBuf::from(sidecar);
+                    let path = project.root().join(&sidecar);
+                    // Present sidecars are copied (and refused if links) like
+                    // any selection; absent ones are simply not needed.
+                    match fs::symlink_metadata(&path) {
+                        Ok(_) => paths.push(sidecar),
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(io_error(&path, e)),
+                    }
+                }
+            }
         }
         // Ancestors sort before descendants; copy each entry only once.
         paths.sort();
@@ -199,15 +256,17 @@ impl IsolatedCopy {
         }
         let copy = Self::allocate_in(temp, Some(project))?;
         for path in &selected {
-            let destination = copy.path.join(path);
+            let destination = copy.path().join(path);
             ensure_directory(destination.parent().expect("selected path has parent"))?;
-            copy_tree(&project.root().join(path), &destination)?;
+            // The destination does not exist yet; guard against the scratch
+            // root itself turning up inside the copied source instead.
+            copy_tree(&project.root().join(path), &destination, copy.path(), true)?;
         }
         if !selected
             .iter()
             .any(|path| path == Path::new("project.godot"))
         {
-            write_new(&copy.path.join("project.godot"), b"config_version=5\n")?;
+            write_new(&copy.path().join("project.godot"), b"config_version=5\n")?;
         }
         Ok(copy)
     }
@@ -216,9 +275,9 @@ impl IsolatedCopy {
 impl Drop for IsolatedCopy {
     fn drop(&mut self) {
         #[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))]
-        let _ = linux::remove_tree(&self.path);
+        let _ = linux::remove_tree(&self.allocated);
         #[cfg(not(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64"))))]
-        let _ = fs::remove_dir_all(&self.path);
+        let _ = fs::remove_dir_all(&self.allocated);
     }
 }
 
@@ -233,22 +292,161 @@ fn invalid_path(path: &Path) -> Error {
     Error::Invalid(format!("unsafe workspace path: {}", path.display()))
 }
 
+/// The one rule for user-supplied slice entries (e.g. `--slice`), shared by
+/// [`IsolatedCopy::slice`] and its callers. `.` components are dropped; what
+/// remains must be relative, made only of normal components (no `..`, root, or
+/// drive prefix), contain no backslash (rejected everywhere so manifests stay
+/// portable) and, on Windows, no `:`. No component may be `.godot` or `.git`,
+/// compared ASCII case-insensitively (a case-insensitive filesystem resolves
+/// `.GODOT` to the import cache) and, on Windows, ignoring trailing dots and
+/// spaces (which Win32 strips).
+///
+/// Returns the entry `/`-joined; `""` means the whole project (`.`, `./`).
+/// An empty input is rejected. Pass a non-empty result to `IsolatedCopy::slice`.
+pub fn normalize_slice_path(path: &str) -> Result<String> {
+    let invalid = || invalid_path(Path::new(path));
+    // Checked on the raw text: on Windows `\` would otherwise split silently.
+    if path.is_empty() || path.contains('\\') {
+        return Err(invalid());
+    }
+    let mut kept = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(name) => kept.push(name.to_str().ok_or_else(invalid)?),
+            _ => return Err(invalid()),
+        }
+    }
+    let normalized = kept.join("/");
+    if !normalized.is_empty() {
+        validate_relative(Path::new(&normalized), true)?;
+    }
+    Ok(normalized)
+}
+
+/// `.godot` (engine state/import cache) and `.git`, matched as documented on
+/// [`normalize_slice_path`].
+fn is_excluded_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    #[cfg(windows)]
+    let name = name.trim_end_matches(['.', ' ']);
+    name.eq_ignore_ascii_case(".godot") || name.eq_ignore_ascii_case(".git")
+}
+
 fn validate_relative(path: &Path, exclude_state: bool) -> Result<()> {
-    // Also reject Windows spellings on Unix, so manifests are portable.
+    // Reject backslashes on Unix too, so manifests are portable. `:` is an
+    // ordinary filename byte on Unix but a drive/stream separator on Windows.
     let text = path.as_os_str().to_string_lossy();
-    if text.is_empty() || text.contains(['\\', ':']) {
+    if text.is_empty() || text.contains('\\') || (cfg!(windows) && text.contains(':')) {
         return Err(invalid_path(path));
     }
     for component in path.components() {
         let Component::Normal(name) = component else {
             return Err(invalid_path(path));
         };
-        if exclude_state && (name == ".godot" || name == ".git") {
+        if exclude_state && is_excluded_name(name) {
             return Err(invalid_path(path));
         }
     }
     Ok(())
 }
+
+/// `gdkit-<20 digits>-<10 digit pid>-<20 digits>`, exactly as `unique_directory` names scratch.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn scratch_pid(name: &str) -> Option<u32> {
+    let mut parts = name.strip_prefix(SCRATCH_PREFIX)?.split('-');
+    let fields = [parts.next()?, parts.next()?, parts.next()?];
+    let digits = |field: &str, len| field.len() == len && field.bytes().all(|b| b.is_ascii_digit());
+    if parts.next().is_some()
+        || !digits(fields[0], 20)
+        || !digits(fields[1], 10)
+        || !digits(fields[2], 20)
+    {
+        return None;
+    }
+    fields[1].parse().ok()
+}
+
+/// `.gdkit-publish-<pid>-<n>`, exactly as the Linux rename fallback names staging.
+#[cfg_attr(
+    not(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64"))),
+    allow(dead_code)
+)]
+fn staging_pid(name: &str) -> Option<u32> {
+    let (pid, counter) = name.strip_prefix(".gdkit-publish-")?.split_once('-')?;
+    let digits = |field: &str, max| {
+        !field.is_empty() && field.len() <= max && field.bytes().all(|b| b.is_ascii_digit())
+    };
+    if !digits(pid, 10) || !digits(counter, 20) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+#[cfg(unix)]
+mod liveness {
+    use std::ffi::c_int;
+    use std::fs::Metadata;
+    use std::io;
+    use std::os::unix::fs::MetadataExt;
+
+    unsafe extern "C" {
+        fn kill(pid: c_int, signal: c_int) -> c_int;
+        fn geteuid() -> u32;
+    }
+
+    // Same value on Linux, macOS, and the BSDs.
+    const ESRCH: i32 = 3;
+
+    /// True only when the process is known not to exist. EPERM (someone
+    /// else's live process), zombies, and odd pids all count as alive.
+    pub(super) fn definitely_dead(pid: u32) -> bool {
+        let Ok(raw) = c_int::try_from(pid) else {
+            return false;
+        };
+        if raw <= 0 || pid == std::process::id() {
+            return false;
+        }
+        // Signal 0 only checks for existence and permission; nothing is sent.
+        (unsafe { kill(raw, 0) }) == -1 && io::Error::last_os_error().raw_os_error() == Some(ESRCH)
+    }
+
+    /// A no-follow `metadata` of a leftover this user may delete: a real
+    /// directory (not a link) owned by our effective uid, from a dead pid.
+    pub(super) fn is_stale(metadata: &Metadata, pid: u32) -> bool {
+        metadata.is_dir() && metadata.uid() == unsafe { geteuid() } && definitely_dead(pid)
+    }
+}
+
+/// Best effort: a failed sweep never blocks allocating a new scratch copy.
+#[cfg(unix)]
+fn sweep_stale_scratch(temp: &Path) {
+    let Ok(entries) = fs::read_dir(temp) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(scratch_pid) else {
+            continue;
+        };
+        let path = temp.join(&name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if liveness::is_stale(&metadata, pid) => {}
+            _ => continue,
+        }
+        // Neither removal follows links below (or at) the named entry.
+        #[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))]
+        let _ = linux::remove_tree(&path);
+        #[cfg(not(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64"))))]
+        let _ = fs::remove_dir_all(&path);
+    }
+}
+
+/// Without a portable liveness probe, leftovers are not swept.
+#[cfg(not(unix))]
+fn sweep_stale_scratch(_temp: &Path) {}
 
 /// Check every existing component, not just the final entry.
 fn check_ancestors(path: &Path) -> Result<()> {
@@ -376,9 +574,15 @@ fn unique_directory(parent: &Path, prefix: &str) -> Result<PathBuf> {
     }
 }
 
+const GDIGNORE: &str = ".gdignore";
+
+/// Copies `source` to `destination` (which must not exist unless it is
+/// `scratch`), failing if the `scratch` root is found inside the copied tree.
+/// With `skip_ignored`, a `source` directory holding `.gdignore` is skipped;
+/// nested ones always are.
 #[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))]
-fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
-    linux::copy_tree(source, destination).map_err(|e| io_error(source, e))
+fn copy_tree(source: &Path, destination: &Path, scratch: &Path, skip_ignored: bool) -> Result<()> {
+    linux::copy_tree(source, destination, scratch, skip_ignored).map_err(|e| io_error(source, e))
 }
 
 fn copy_permissions(output: &File, metadata: &fs::Metadata) -> io::Result<()> {
@@ -393,20 +597,39 @@ fn copy_permissions(output: &File, metadata: &fs::Metadata) -> io::Result<()> {
 }
 
 #[cfg(not(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64"))))]
-fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
+fn copy_tree(source: &Path, destination: &Path, scratch: &Path, skip_ignored: bool) -> Result<()> {
+    // Best effort (paths, not pinned inodes): refuse a scratch root that
+    // resolves inside the source before visiting anything.
+    let canonical = |path: &Path| fs::canonicalize(path).map_err(|e| io_error(path, e));
+    if canonical(scratch)?.starts_with(canonical(source)?) {
+        return Err(Error::Invalid(format!(
+            "scratch {} overlaps copied source {}",
+            scratch.display(),
+            source.display()
+        )));
+    }
+    copy_entry(source, destination, skip_ignored)
+}
+
+#[cfg(not(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64"))))]
+fn copy_entry(source: &Path, destination: &Path, skip_ignored: bool) -> Result<()> {
     let metadata = fs::symlink_metadata(source).map_err(|e| io_error(source, e))?;
     if metadata.is_dir() {
-        ensure_directory(destination)?;
         let mut entries = fs::read_dir(source)
             .map_err(|e| io_error(source, e))?
             .collect::<io::Result<Vec<_>>>()
             .map_err(|e| io_error(source, e))?;
+        // Godot skips the whole directory; so do we, without inspecting it.
+        if skip_ignored && entries.iter().any(|entry| entry.file_name() == GDIGNORE) {
+            return Ok(());
+        }
+        ensure_directory(destination)?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            if entry.file_name() == ".godot" || entry.file_name() == ".git" {
+            if is_excluded_name(&entry.file_name()) {
                 continue;
             }
-            copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
+            copy_entry(&entry.path(), &destination.join(entry.file_name()), true)?;
         }
         Ok(())
     } else if metadata.is_file() {
@@ -428,7 +651,9 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
 
 /// Atomically publishes `staged` at `destination`, never replacing an entry.
 /// The staging file must be regular and on the destination filesystem. On
-/// success it is consumed. No partial destination is exposed on failure.
+/// success it is consumed, best effort: once `destination` exists the call
+/// succeeds even if removing the staging name then fails (it is left behind).
+/// No partial destination is exposed on failure.
 /// Filesystems without hard links use an OS no-replace rename; platforms without
 /// that primitive fail closed rather than risk overwriting an authored file.
 pub fn publish_new_file(staged: &Path, destination: &Path) -> Result<()> {
@@ -462,7 +687,11 @@ fn publish_with(
             return Err(invalid_path(destination));
         }
         match before_link().and_then(|()| fs::hard_link(staged, destination)) {
-            Ok(()) => fs::remove_file(staged).map_err(|e| io_error(staged, e)),
+            Ok(()) => {
+                // Published; a failed cleanup must not report the publication as failed.
+                let _ = fs::remove_file(staged);
+                Ok(())
+            }
             Err(e)
                 if matches!(
                     e.kind(),
@@ -674,16 +903,25 @@ mod linux {
         Ok((metadata.dev(), metadata.ino()))
     }
 
-    pub(super) fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
+    pub(super) fn copy_tree(
+        source: &Path,
+        destination: &Path,
+        scratch: &Path,
+        skip_ignored: bool,
+    ) -> io::Result<()> {
+        // The scratch root always exists (a slice destination may not yet), so
+        // its inode is what the traversal must never meet inside the source.
+        let forbidden = identity(&Dir::open(scratch, false)?.0)?;
         let (source_dir, source_name) = parent(source, false)?;
         let source = source_dir.node(&source_name)?;
         let (destination_dir, destination_name) = parent(destination, true)?;
-        let forbidden = match destination_dir.node(&destination_name) {
-            Ok(file) => Some(identity(&file)?),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e),
-        };
-        copy_node(source, &destination_dir, &destination_name, forbidden)
+        copy_node(
+            source,
+            &destination_dir,
+            &destination_name,
+            Some(forbidden),
+            skip_ignored,
+        )
     }
 
     fn copy_node(
@@ -691,6 +929,7 @@ mod linux {
         destination: &Dir,
         name: &OsStr,
         forbidden: Option<(u64, u64)>,
+        skip_ignored: bool,
     ) -> io::Result<()> {
         let metadata = source.metadata()?;
         // Also catch a scratch directory moved into the source during traversal.
@@ -701,19 +940,23 @@ mod linux {
             ));
         }
         if metadata.is_dir() {
-            let destination = destination.child(name, true)?;
             let source = Dir(source);
             // read_dir pins its directory stream. Entry paths are deliberately
             // ignored; every child is opened relative to the retained descriptor.
             let mut names = fs::read_dir(proc_path(&source.0))?
                 .map(|entry| entry.map(|entry| entry.file_name()))
                 .collect::<io::Result<Vec<_>>>()?;
+            // Godot skips the whole directory; so do we, without inspecting it.
+            if skip_ignored && names.iter().any(|name| name == GDIGNORE) {
+                return Ok(());
+            }
+            let destination = destination.child(name, true)?;
             names.sort();
             for name in names {
-                if name == ".godot" || name == ".git" {
+                if is_excluded_name(&name) {
                     continue;
                 }
-                copy_node(source.node(&name)?, &destination, &name, forbidden)?;
+                copy_node(source.node(&name)?, &destination, &name, forbidden, true)?;
             }
             Ok(())
         } else {
@@ -731,9 +974,34 @@ mod linux {
         dir: Dir,
     }
 
+    /// Best effort: removes `.gdkit-publish-*` dirs whose creator is gone.
+    fn sweep_stale_staging(parent: &Dir) {
+        let Ok(entries) = fs::read_dir(proc_path(&parent.0)) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(pid) = name.to_str().and_then(staging_pid) else {
+                continue;
+            };
+            // O_PATH|O_NOFOLLOW: a link here is inspected as a link, not followed.
+            let Ok(pin) = open(parent.0.as_raw_fd(), &name, PATH | NOFOLLOW) else {
+                continue;
+            };
+            if pin
+                .metadata()
+                .is_ok_and(|metadata| liveness::is_stale(&metadata, pid))
+            {
+                // Anchored at the pinned parent; descendants are never followed.
+                let _ = fs::remove_dir_all(proc_path(&parent.0).join(&name));
+            }
+        }
+    }
+
     impl<'a> Staging<'a> {
         fn new(parent: &'a Dir) -> io::Result<Self> {
             static NEXT: AtomicU64 = AtomicU64::new(0);
+            sweep_stale_staging(parent);
             loop {
                 let name = OsString::from(format!(
                     ".gdkit-publish-{}-{}",
@@ -818,7 +1086,10 @@ mod linux {
         }
         // The caller owns the staging name exclusively. unlinkat cannot follow a
         // final symlink or be redirected by replacement of a parent pathname.
-        source_dir.unlink(&source_name, false)
+        // The destination already exists: a cleanup failure must not turn a
+        // completed publication into an error (a retry could only collide).
+        let _ = source_dir.unlink(&source_name, false);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -902,7 +1173,7 @@ mod linux {
                 })
                 .unwrap();
             let destination = Dir::open(&root.path().join("destination"), false).unwrap();
-            copy_node(source, &destination, OsStr::new("copied"), None).unwrap();
+            copy_node(source, &destination, OsStr::new("copied"), None, true).unwrap();
             assert_eq!(
                 fs::read(root.path().join("destination/copied/authored")).unwrap(),
                 b"original"
@@ -923,9 +1194,67 @@ mod linux {
             fs::write(root.path().join("authored"), b"original").unwrap();
             let scratch = root.path().join("scratch");
             fs::create_dir(&scratch).unwrap();
-            assert!(copy_tree(root.path(), &scratch).is_err());
+            assert!(copy_tree(root.path(), &scratch, &scratch, false).is_err());
             assert!(!scratch.join("scratch").exists());
             assert_eq!(fs::read(root.path().join("authored")).unwrap(), b"original");
+        }
+
+        #[test]
+        fn slice_copy_refuses_scratch_inside_selected_source() {
+            // The slice destination does not exist yet; the scratch root does.
+            let root = tempfile::tempdir().unwrap();
+            fs::create_dir(root.path().join("selected")).unwrap();
+            fs::write(root.path().join("selected/authored"), b"original").unwrap();
+            let scratch = root.path().join("selected/scratch");
+            fs::create_dir(&scratch).unwrap();
+            let destination = scratch.join("selected");
+            assert!(
+                copy_tree(&root.path().join("selected"), &destination, &scratch, true).is_err()
+            );
+            assert!(!destination.join("scratch/selected").exists());
+            assert_eq!(
+                fs::read(root.path().join("selected/authored")).unwrap(),
+                b"original"
+            );
+        }
+
+        #[test]
+        fn rename_fallback_sweeps_dead_staging_dirs() {
+            let root = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            fs::write(outside.path().join("keep"), b"outside").unwrap();
+            let dead = crate::workspace::dead_pid();
+            let live = std::process::id();
+            let stale = root.path().join(format!(".gdkit-publish-{dead}-7"));
+            fs::create_dir(&stale).unwrap();
+            fs::write(stale.join("payload"), b"leftover").unwrap();
+            symlink(outside.path(), stale.join("link")).unwrap();
+            let kept = [
+                format!(".gdkit-publish-{live}-7"),
+                format!(".gdkit-publish-{dead}-x"),
+                format!(".gdkit-publish-{dead}"),
+                format!("gdkit-publish-{dead}-7"),
+            ];
+            for name in &kept {
+                fs::create_dir(root.path().join(name)).unwrap();
+            }
+            let link = format!(".gdkit-publish-{dead}-8");
+            symlink(outside.path(), root.path().join(&link)).unwrap();
+            let staged = root.path().join("staged");
+            fs::write(&staged, b"payload").unwrap();
+            publish(&staged, &root.path().join("published"), || {
+                Err(io::ErrorKind::Unsupported.into())
+            })
+            .unwrap();
+            assert!(!stale.exists());
+            for name in kept.iter().chain([&link]) {
+                assert!(
+                    fs::symlink_metadata(root.path().join(name)).is_ok(),
+                    "{name}"
+                );
+            }
+            assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"outside");
+            assert_eq!(fs::read(root.path().join("published")).unwrap(), b"payload");
         }
 
         #[test]
@@ -1037,9 +1366,90 @@ fn rename_new(_from: &Path, _to: &Path) -> io::Result<()> {
     ))
 }
 
+/// The pid of a child that has exited and been reaped.
+#[cfg(all(test, unix))]
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    assert!(liveness::definitely_dead(pid));
+    pid
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn allocation_sweeps_only_dead_owned_scratch_dirs() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("keep"), b"outside").unwrap();
+        let dead = dead_pid();
+        let name = |pid: u32, n: u64| format!("gdkit-{:020}-{pid:010}-{n:020}", 1);
+        let stale = temp.path().join(name(dead, 1));
+        fs::create_dir_all(stale.join(".godot")).unwrap();
+        fs::write(stale.join("project.godot"), b"config_version=5\n").unwrap();
+        symlink(outside.path(), stale.join("link")).unwrap();
+        let kept = [
+            name(std::process::id(), 2),
+            name(1, 3),
+            format!("gdkit-{dead}"),
+            format!("{}-x", name(dead, 4)),
+            format!("gdkit-{:019}-{dead:010}-{:020}", 1, 5),
+            format!("x{}", name(dead, 6)),
+        ];
+        for kept in &kept {
+            fs::create_dir(temp.path().join(kept)).unwrap();
+        }
+        let link = name(dead, 7);
+        symlink(outside.path(), temp.path().join(&link)).unwrap();
+        let file = name(dead, 8);
+        fs::write(temp.path().join(&file), b"not a directory").unwrap();
+
+        let copy = IsolatedCopy::allocate_in(temp.path(), None).unwrap();
+        assert!(!stale.exists());
+        for name in kept.iter().chain([&link, &file]) {
+            assert!(
+                fs::symlink_metadata(temp.path().join(name)).is_ok(),
+                "{name}"
+            );
+        }
+        assert!(copy.path().is_dir());
+        assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"outside");
+    }
+
+    #[test]
+    fn leftover_names_parse_only_in_their_exact_shape() {
+        let pid = |value: u32| format!("{value:010}");
+        let scratch = format!("gdkit-{:020}-{}-{:020}", 7, pid(42), 3);
+        assert_eq!(scratch_pid(&scratch), Some(42));
+        for bad in [
+            format!("{scratch}-1"),
+            format!("gdkit-{:020}-{}", 7, pid(42)),
+            format!("gdkit-{:020}-{:09}-{:020}", 7, 42, 3),
+            scratch.replace("-00", "-+0"),
+            "gdkit-".to_owned(),
+        ] {
+            assert_eq!(scratch_pid(&bad), None, "{bad}");
+        }
+        assert_eq!(staging_pid(".gdkit-publish-42-0"), Some(42));
+        for bad in [
+            ".gdkit-publish-42",
+            ".gdkit-publish--0",
+            ".gdkit-publish-42-",
+            ".gdkit-publish-42-0-1",
+            ".gdkit-publish-+42-0",
+            "gdkit-publish-42-0",
+        ] {
+            assert_eq!(staging_pid(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn scratch_inside_project_is_rejected_before_allocation() {
@@ -1077,10 +1487,15 @@ mod tests {
         let mut allocated = PathBuf::new();
         let result = (|| -> Result<IsolatedCopy> {
             let copy = IsolatedCopy::allocate()?;
-            allocated = copy.path.clone();
-            copy_tree(source.path(), &copy.path)?;
-            assert!(copy.path.join("a-good").exists());
-            copy_tree(&source.path().join("missing"), &copy.path.join("missing"))?;
+            allocated = copy.path().to_path_buf();
+            copy_tree(source.path(), copy.path(), copy.path(), false)?;
+            assert!(copy.path().join("a-good").exists());
+            copy_tree(
+                &source.path().join("missing"),
+                &copy.path().join("missing"),
+                copy.path(),
+                true,
+            )?;
             Ok(copy)
         })();
         assert!(result.is_err());
@@ -1105,39 +1520,63 @@ mod tests {
         }
     }
 
+    /// Both link failures that mean "no hard links here" take the rename path.
+    /// It must publish the full payload with the staged mode, consume the
+    /// staging file, leave no private staging dir behind, and never replace.
     #[test]
     fn publish_new_file_falls_back_from_hard_link_to_rename_on_filesystems_without_links() {
-        let dir = tempfile::tempdir().unwrap();
-        let staged = dir.path().join("staged");
-        let destination = dir.path().join("destination");
-        fs::write(&staged, b"complete payload").unwrap();
-        let result = publish_with(&staged, &destination, || {
-            Err(io::ErrorKind::Unsupported.into())
-        });
-        if cfg!(any(
-            all(
-                target_os = "linux",
-                any(target_arch = "x86", target_arch = "x86_64")
-            ),
-            target_vendor = "apple",
-            windows
-        )) {
-            result.unwrap();
-            assert_eq!(fs::read(&destination).unwrap(), b"complete payload");
-            assert!(!staged.exists());
-            fs::write(&staged, b"replacement").unwrap();
-            assert!(
-                publish_with(&staged, &destination, || Err(
-                    io::ErrorKind::Unsupported.into()
-                ))
-                .is_err()
-            );
-            assert_eq!(fs::read(&destination).unwrap(), b"complete payload");
-            assert_eq!(fs::read(&staged).unwrap(), b"replacement");
-        } else {
-            assert!(result.is_err());
-            assert!(!destination.exists());
-            assert!(staged.exists());
+        let listing = |dir: &Path| {
+            let mut names: Vec<_> = fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        for kind in [io::ErrorKind::Unsupported, io::ErrorKind::PermissionDenied] {
+            let dir = tempfile::tempdir().unwrap();
+            let staged = dir.path().join("staged");
+            let destination = dir.path().join("destination");
+            let payload = vec![7_u8; 256 * 1024];
+            fs::write(&staged, &payload).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&staged, fs::Permissions::from_mode(0o640)).unwrap();
+            }
+            let mut linked = false;
+            let result = publish_with(&staged, &destination, || {
+                linked = true;
+                Err(kind.into())
+            });
+            assert!(linked, "the injected link failure must be reached");
+            if cfg!(any(
+                all(
+                    target_os = "linux",
+                    any(target_arch = "x86", target_arch = "x86_64")
+                ),
+                target_vendor = "apple",
+                windows
+            )) {
+                result.unwrap();
+                assert_eq!(fs::read(&destination).unwrap(), payload);
+                assert_eq!(listing(dir.path()), ["destination"]);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = fs::metadata(&destination).unwrap().permissions().mode();
+                    assert_eq!(mode & 0o777, 0o640);
+                }
+                fs::write(&staged, b"replacement").unwrap();
+                assert!(publish_with(&staged, &destination, || Err(kind.into())).is_err());
+                assert_eq!(fs::read(&destination).unwrap(), payload);
+                assert_eq!(fs::read(&staged).unwrap(), b"replacement");
+                assert_eq!(listing(dir.path()), ["destination", "staged"]);
+            } else {
+                assert!(result.is_err());
+                assert!(!destination.exists());
+                assert!(staged.exists());
+            }
         }
     }
 }

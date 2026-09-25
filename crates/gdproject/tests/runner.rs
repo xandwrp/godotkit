@@ -13,6 +13,9 @@ use gdproject::runner::{self, Harness, Invocation};
 use gdproject::{Engine, Error};
 use serde_json::{Value, json};
 
+/// Generous default so a loaded machine never turns a quick fixture into a timeout.
+const DEADLINE: Duration = Duration::from_secs(20);
+
 struct Fixture {
     dir: tempfile::TempDir,
     engine: Engine,
@@ -53,7 +56,7 @@ impl Fixture {
     }
 
     fn invocation(&self) -> Invocation<'_> {
-        let mut invocation = Invocation::new(&self.engine, self.dir.path(), Duration::from_secs(2));
+        let mut invocation = Invocation::new(&self.engine, self.dir.path(), DEADLINE);
         for (key, file) in [
             ("ARGS", "args"),
             ("SCRIPT_PATH", "script-path"),
@@ -83,15 +86,10 @@ impl Fixture {
 }
 
 fn envelope(harness: Harness) -> String {
-    format!(
-        "printf '%s\\n' '{}'",
-        format!(
-            "GDKIT_RESULT:{}",
-            json!({
-                "protocol": 1, "harness": harness.name(), "ok": true, "payload": {"count": 3}
-            })
-        )
-    )
+    let payload = json!({
+        "protocol": 1, "harness": harness.name(), "ok": true, "payload": {"count": 3}
+    });
+    format!("printf '%s\\n' 'GDKIT_RESULT:{payload}'")
 }
 
 #[test]
@@ -191,14 +189,15 @@ fn run_harness_enforces_deadline_and_reports_timeout_with_partial_output() {
     let fixture =
         Fixture::new("printf 'partial'; printf 'SCRIPT ERROR: before timeout\\n' >&2; sleep 30");
     let mut invocation = fixture.invocation();
-    invocation.deadline = Duration::from_millis(150);
+    invocation.deadline = Duration::from_secs(1);
     let started = Instant::now();
     let run = runner::run_harness_captured::<Value>(&invocation, Harness::Check).unwrap();
     assert!(matches!(run.envelope, Err(Error::Timeout { .. })));
     assert!(run.captured.timed_out);
     assert_eq!(run.captured.stdout(), b"partial");
     assert_eq!(run.diagnostics.len(), 1);
-    assert!(started.elapsed() < Duration::from_secs(3));
+    // Far below the fixture's 30s sleep, so the deadline (not exit) ended it.
+    assert!(started.elapsed() < Duration::from_secs(10));
     assert!(!fixture.script().exists());
 }
 
@@ -227,23 +226,35 @@ fn assert_intentional_unwind(result: std::thread::Result<()>) {
 }
 
 #[test]
-fn temp_files_are_removed_after_every_outcome_including_panic() {
-    for body in [
-        envelope(Harness::Check),
-        "exit 4".into(),
-        "printf 'GDKIT_RESULT:bad\\n'".into(),
-        "sleep 30".into(),
+fn temp_files_are_removed_after_every_outcome() {
+    for (body, deadline) in [
+        (envelope(Harness::Check), DEADLINE),
+        ("exit 4".into(), DEADLINE),
+        ("printf 'GDKIT_RESULT:bad\\n'".into(), DEADLINE),
+        ("sleep 30".into(), Duration::from_millis(150)),
     ] {
         let fixture = Fixture::new(&body);
         let mut invocation = fixture.invocation();
-        invocation.deadline = Duration::from_millis(150);
-        let panic = std::panic::catch_unwind(|| {
-            let _run = runner::run_harness_captured::<Value>(&invocation, Harness::Check).unwrap();
-            std::panic::panic_any(IntentionalUnwind);
-        });
-        assert_intentional_unwind(panic);
+        invocation.deadline = deadline;
+        runner::run_harness_captured::<Value>(&invocation, Harness::Check).unwrap();
         assert!(!fixture.script().parent().unwrap().exists());
     }
+}
+
+#[test]
+fn harness_scratch_is_removed_when_a_panic_unwinds_while_it_is_live() {
+    // The runner has no hook to panic mid-run, so unwind through the scratch
+    // guard it holds for the harness directory (spawn_game covers its guard).
+    let mut live = None;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let files = gdproject::workspace::IsolatedCopy::empty().unwrap();
+        fs::write(files.path().join("check.gd"), Harness::Check.source()).unwrap();
+        live = Some(files.path().to_path_buf());
+        std::panic::panic_any(IntentionalUnwind);
+    }));
+    assert_intentional_unwind(result);
+    let path = live.expect("scratch was created before the panic");
+    assert!(!path.exists());
 }
 
 #[test]
@@ -321,7 +332,9 @@ fn script_bootstrap_raw_capture_does_not_require_a_success_envelope() {
     ] {
         let fixture = Fixture::new(body);
         let mut invocation = fixture.invocation();
-        invocation.deadline = Duration::from_millis(150);
+        if timeout {
+            invocation.deadline = Duration::from_secs(1);
+        }
         let (captured, diagnostics) =
             runner::run_harness_raw(&invocation, Harness::ScriptBootstrap).unwrap();
         assert_eq!(captured.stdout(), b"GDKIT_SCRIPT_STARTED\n");
@@ -344,7 +357,7 @@ fn game_guard_keeps_embedded_files_until_drop_including_unwind() {
             while !fixture.dir.path().join("script-path").exists()
                 || !fixture.dir.path().join("protocol-copy").exists()
             {
-                assert!(started.elapsed() < Duration::from_secs(2));
+                assert!(started.elapsed() < Duration::from_secs(10));
                 std::thread::sleep(Duration::from_millis(5));
             }
             assert!(fixture.script().exists());
@@ -375,15 +388,8 @@ fn game_guard_keeps_embedded_files_until_drop_including_unwind() {
 fn harness_hash_is_repeatable_and_covers_every_embedded_source() {
     let mut hash = blake3::Hasher::new();
     hash.update(runner::PROTOCOL_SOURCE.as_bytes());
-    for harness in [
-        Harness::Probe,
-        Harness::Check,
-        Harness::ImportScan,
-        Harness::ResourceSchema,
-        Harness::ResourceCreate,
-        Harness::RuntimeProbe,
-        Harness::ScriptBootstrap,
-    ] {
+    // `Harness::ALL` is compile-time checked to list every variant.
+    for harness in Harness::ALL {
         assert!(!harness.source().is_empty());
         hash.update(harness.name().as_bytes());
         hash.update(&(harness.source().len() as u64).to_le_bytes());

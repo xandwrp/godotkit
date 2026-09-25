@@ -246,6 +246,39 @@ fn shutdown_leak_messages_are_classified_not_dropped() {
     assert!(parsed[..4].iter().all(|d| d.is_shutdown_noise));
     assert!(parsed[4..].iter().all(|d| !d.is_shutdown_noise));
     assert!(diagnostics::has_errors(&parsed[..4]));
+
+    // Verbatim Godot 4.7.2 exit output (headless, leaked Node/Resource/RIDs).
+    let godot_4_7 = [
+        "WARNING: 1 RID of type \"CanvasItem\" was leaked.",
+        "WARNING: 3 ObjectDB instances were leaked at exit (run with `--verbose` for details).",
+        "WARNING: 1 ObjectDB instance was leaked at exit (run with `--verbose` for details).",
+        "ERROR: 1 RID allocations of type 'P11GodotBody2D' were leaked at exit.",
+        "ERROR: 1 RID allocations of type 'PN13RendererDummy14TextureStorage12DummyTextureE' were leaked at exit.",
+        "ERROR: 1 resources still in use at exit (run with --verbose for details).",
+        "ERROR: 1 resources still in use at exit.",
+        "ERROR: Pages in use exist at exit in PagedAllocator: N13RendererDummy15MaterialStorage13DummyMaterialE",
+    ];
+    let lines: Vec<_> = godot_4_7
+        .iter()
+        .flat_map(|line| {
+            [
+                (Stderr, *line),
+                (Stderr, "   at: cleanup (core/object/object.cpp:2536)"),
+            ]
+        })
+        .collect();
+    let parsed = diagnostics::parse(&capture(&lines), 0);
+    assert_eq!(parsed.len(), godot_4_7.len());
+    assert!(parsed.iter().all(|d| d.is_shutdown_noise), "{parsed:#?}");
+    for not_noise in [
+        "ERROR: Cannot get path of node as it is not in a scene tree.",
+        "ERROR: x RIDs of type \"CanvasItem\" were leaked.",
+        "ERROR: 3 ObjectDB instances are fine.",
+        "ERROR: Failed loading resource: res://thing.tres.",
+    ] {
+        let parsed = diagnostics::parse(&capture(&[(Stderr, not_noise)]), 0);
+        assert!(!parsed[0].is_shutdown_noise, "{not_noise}");
+    }
 }
 
 #[test]
@@ -491,4 +524,228 @@ fn malformed_utf8_and_multiline_events_do_not_lose_later_errors() {
     assert_eq!(parsed[0].message, "�first");
     assert_eq!(parsed[0].line, Some(2));
     assert_eq!(parsed[2].message, "final");
+}
+
+#[test]
+fn unrecognized_lines_end_a_block_so_shader_frames_never_attach_elsewhere() {
+    // Verbatim Godot 4.7.2 headless output for Shader.get_rid() on a broken shader:
+    // the listing goes to stdout, the header and frames to stderr.
+    let parsed = diagnostics::parse(
+        &capture(&[
+            (Stderr, "ERROR: earlier\n   at: f (res://earlier.gd:1)"),
+            (Stdout, "--Main Shader--"),
+            (Stdout, "    1 | shader_type spatial;"),
+            (Stdout, "E   3->  ALBEDO = vec3(1.0) + undefined_thing;"),
+            (
+                Stderr,
+                "SHADER ERROR: Unknown identifier in expression: 'undefined_thing'.",
+            ),
+            (Stderr, "          at: (null) (:3)"),
+            (
+                Stderr,
+                "          GDScript backtrace (most recent call first):",
+            ),
+            (
+                Stderr,
+                "              [0] _initialize (res://shaderrid.gd:6)",
+            ),
+            (Stderr, "ERROR: Shader compilation failed."),
+            (
+                Stderr,
+                "   at: shader_set_code (servers/rendering/dummy/storage/material_storage.cpp:192)",
+            ),
+            (Stdout, "print output does not end the stderr block"),
+            (Stderr, "   at: second (core/b.cpp:2)"),
+            (Stderr, "some unrelated engine line"),
+            (Stderr, "   at: stray (res://stray.gd:9)"),
+            (Stderr, "[0] stray (res://stray.gd:9)"),
+        ]),
+        0,
+    );
+    assert_eq!(parsed.len(), 3, "{parsed:#?}");
+    assert_eq!(parsed[0].frames.len(), 1);
+    assert_eq!(parsed[0].resource.as_deref(), Some("res://earlier.gd"));
+    let shader = &parsed[1];
+    assert_eq!(shader.severity, Severity::Error);
+    assert_eq!(shader.code.as_deref(), Some("SHADER_ERROR"));
+    assert_eq!(
+        shader.message,
+        "Unknown identifier in expression: 'undefined_thing'."
+    );
+    assert_eq!(shader.frames.len(), 2);
+    assert_eq!(shader.frames[0].line, Some(3));
+    assert_eq!(shader.frames[0].resource, None);
+    assert_eq!(shader.resource.as_deref(), Some("res://shaderrid.gd"));
+    // The stray frames follow an unrecognized stderr line: attached to nothing.
+    assert_eq!(parsed[2].message, "Shader compilation failed.");
+    assert_eq!(parsed[2].frames.len(), 2);
+    assert_eq!(parsed[2].resource, None);
+}
+
+#[test]
+fn copy_root_paths_are_rewritten_to_res_in_messages_and_frames() {
+    let identities: Vec<_> = (0..2)
+        .map(|_| {
+            let copy = tempfile::tempdir().unwrap();
+            let root = copy.path().display().to_string();
+            // Verbatim Godot 4.7.2 wording for an invalid GDExtension library.
+            let lines = [
+                format!(
+                    "ERROR: Can't open dynamic library: {root}/bin/libx.so. Error: {root}/bin/libx.so: file too short."
+                ),
+                "   at: open_dynamic_library (drivers/unix/os_unix.cpp:1066)".into(),
+                format!("ERROR: native\n   at: f ({root}/addons/x.gd:3)"),
+                format!("WARNING: siblings {root}-old/a {root}2/b x{root}/c stay; the root {root}."),
+            ];
+            let lines: Vec<_> = lines.iter().map(|l| (Stderr, l.as_str())).collect();
+            let captured = capture(&lines);
+            let unrooted = diagnostics::parse(&captured, 0);
+            assert_eq!(unrooted[0].message, lines[0].1["ERROR: ".len()..]);
+            let parsed = diagnostics::parse_rooted(&captured, 0, Some(copy.path()));
+            assert_eq!(
+                parsed[0].message,
+                "Can't open dynamic library: res://bin/libx.so. Error: res://bin/libx.so: file too short."
+            );
+            assert_eq!(parsed[0].resource.as_deref(), Some("res://bin/libx.so"));
+            assert_eq!(parsed[0].line, None);
+            assert_eq!(
+                parsed[1].frames[0].resource.as_deref(),
+                Some("res://addons/x.gd")
+            );
+            assert_eq!(parsed[1].resource.as_deref(), Some("res://addons/x.gd"));
+            assert_eq!(parsed[1].line, Some(3));
+            assert_eq!(
+                parsed[2].message,
+                format!("siblings {root}-old/a {root}2/b x{root}/c stay; the root res://.")
+            );
+            parsed[0].identity.clone()
+        })
+        .collect();
+    assert_eq!(identities[0], identities[1]);
+}
+
+#[test]
+fn embedded_resource_locations_fill_fields_and_leave_identity_stable() {
+    // Verbatim Godot 4.7.2 wordings from load() of broken text resources and a ConfigFile.
+    let parse = |line: u32| {
+        let lines = [
+            format!("ERROR: res://bad.tres:{line} - Parse Error: Expected float in constructor."),
+            "   at: _printerr (scene/resources/resource_format_text.cpp:41)".into(),
+            "   GDScript backtrace (most recent call first):".into(),
+            "       [0] _initialize (res://loadbad.gd:4)".into(),
+            format!("ERROR: Parse Error: Parse error. [Resource file res://bad.tscn:{line}]"),
+            format!(
+                "ERROR: ConfigFile parse error at res://bad.cfg:{line}: Unexpected identifier 'y'."
+            ),
+            format!(
+                "ERROR: res://missing.tscn:{line} - Parse Error: [ext_resource] referenced non-existent resource at: res://gone.gd."
+            ),
+            "ERROR: Failed loading resource: res://bad.tres.".into(),
+            "   at: _load (core/io/resource_loader.cpp:317)".into(),
+        ];
+        let lines: Vec<_> = lines.iter().map(|l| (Stderr, l.as_str())).collect();
+        diagnostics::parse(&capture(&lines), 0)
+    };
+    let (first, moved) = (parse(5), parse(40));
+    assert_eq!(first.len(), 5);
+    for (diagnostic, resource) in first.iter().zip([
+        "res://bad.tres",
+        "res://bad.tscn",
+        "res://bad.cfg",
+        "res://missing.tscn",
+    ]) {
+        assert_eq!(diagnostic.resource.as_deref(), Some(resource));
+        assert_eq!(diagnostic.line, Some(5));
+    }
+    // The embedded location wins over the loading script's res:// frame.
+    assert_eq!(first[0].frames.len(), 2);
+    // A message without an embedded line falls back to the path it mentions.
+    assert_eq!(first[4].resource.as_deref(), Some("res://bad.tres"));
+    assert_eq!(first[4].line, None);
+    for (a, b) in first.iter().zip(&moved) {
+        assert_eq!(a.identity, b.identity, "{}", a.message);
+    }
+    assert_ne!(first[0].message, moved[0].message);
+    assert_eq!(moved[0].line, Some(40));
+    let other = diagnostics::parse(
+        &capture(&[(
+            Stderr,
+            "ERROR: res://bad.tres:5 - Parse Error: Expected string in constructor.",
+        )]),
+        0,
+    );
+    assert_ne!(other[0].identity, first[0].identity);
+    for unlocated in [
+        "ERROR: bad.tres:5 - Parse Error: relative",
+        "ERROR: res://bad.tres:x - Parse Error: no line",
+        "ERROR: Parse Error: x [Resource file res://a.tscn]",
+        "ERROR: ConfigFile parse error at res://a.cfg: no line.",
+    ] {
+        let parsed = diagnostics::parse(&capture(&[(Stderr, unlocated)]), 0);
+        assert_eq!(parsed[0].line, None, "{unlocated}");
+    }
+}
+
+#[test]
+fn mentioned_resources_let_ignore_rules_match_engine_messages() {
+    let copy = tempfile::tempdir().unwrap();
+    let root = copy.path().display().to_string();
+    let library = format!(
+        "ERROR: Can't open dynamic library: {root}/bin/libx.so. Error: {root}/bin/libx.so: file too short."
+    );
+    let mut parsed = diagnostics::parse_rooted(
+        &capture(&[
+            (Stderr, library.as_str()),
+            (
+                Stderr,
+                "   at: open_dynamic_library (drivers/unix/os_unix.cpp:1066)",
+            ),
+            (
+                Stderr,
+                "ERROR: Can't open GDExtension dynamic library: 'res://x.gdextension'.",
+            ),
+            (
+                Stderr,
+                "   at: open_library (core/extension/gdextension.cpp:811)",
+            ),
+            (
+                Stderr,
+                "ERROR: res://bad.tres:5 - Parse Error: Expected float in constructor.",
+            ),
+            (
+                Stderr,
+                "ERROR: Error loading extension: 'res://y.gdextension'.",
+            ),
+        ]),
+        0,
+        Some(copy.path()),
+    );
+    assert_eq!(parsed[1].resource.as_deref(), Some("res://x.gdextension"));
+    let rule = |message: &str, source: &str| IgnoreRule {
+        message: message.into(),
+        source: gdview::ResPath::parse(source).unwrap(),
+    };
+    let rules = [
+        rule(
+            "ERROR: Can't open dynamic library: res://bin/libx.so. Error: res://bin/libx.so: file too short.",
+            "res://bin/libx.so",
+        ),
+        rule(
+            "ERROR: Can't open GDExtension dynamic library: 'res://x.gdextension'.",
+            "res://x.gdextension",
+        ),
+        // Written before an edit moved the error: the embedded line is not compared.
+        rule(
+            "ERROR: res://bad.tres:2 - Parse Error: Expected float in constructor.",
+            "res://bad.tres",
+        ),
+        // Wrong source: must not match.
+        rule(
+            "ERROR: Error loading extension: 'res://y.gdextension'.",
+            "res://x.gdextension",
+        ),
+    ];
+    assert_eq!(diagnostics::apply_ignore_rules(&mut parsed, &rules), 3);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].resource.as_deref(), Some("res://y.gdextension"));
 }

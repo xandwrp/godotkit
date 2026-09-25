@@ -246,6 +246,7 @@ dependencies = [
  "blake3",
  "gdproject",
  "gdview",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

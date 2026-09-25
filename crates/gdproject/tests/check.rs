@@ -126,8 +126,20 @@ fn static_only_needs_no_engine_and_slice_keeps_findings_located_in_it() {
 
 #[test]
 fn slice_paths_that_escape_the_project_are_tool_errors() {
-    let dir = project(&[]);
-    for bad in ["../outside", "/abs/path", ".godot/imported", "a/../../b"] {
+    let dir = project(&[("a/x.gd", "extends Node\n")]);
+    for bad in [
+        "../outside",
+        "/abs/path",
+        ".godot/imported",
+        "a/../../b",
+        "a/../a/x.gd",
+        ".git",
+        "a\\x.gd",
+        // Normalized fine, but not in the project: a typo must not pass vacuously.
+        "typo.gd",
+        "./a/typo.gd",
+        "a/x.gd/child",
+    ] {
         let result = static_check(
             dir.path(),
             CheckRequest {
@@ -138,6 +150,90 @@ fn slice_paths_that_escape_the_project_are_tool_errors() {
         assert!(
             matches!(result, Err(gdproject::Error::Invalid(_))),
             "{bad}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn slice_entries_are_normalized_and_must_exist_before_any_engine_work() {
+    let dir = project(&[
+        (
+            "a/x.gd",
+            "extends Node\nconst X = preload(\"res://gone.tscn\")\n",
+        ),
+        (
+            "b/y.gd",
+            "extends Node\nconst Y = preload(\"res://gone.tscn\")\n",
+        ),
+    ]);
+    for spelling in ["./a/x.gd", "a/./x.gd", "a/x.gd/.", "./a"] {
+        let report = static_check(
+            dir.path(),
+            CheckRequest {
+                slice: vec![PathBuf::from(spelling)],
+                ..CheckRequest::default()
+            },
+        )
+        .unwrap();
+        assert!(report.project.sliced, "{spelling}");
+        assert_eq!(report.phases[0].diagnostics.len(), 1, "{spelling}");
+        assert_eq!(
+            report.phases[0].diagnostics[0].resource.as_deref(),
+            Some("res://a/x.gd"),
+            "{spelling}"
+        );
+    }
+    for root in [".", "./"] {
+        let report = static_check(
+            dir.path(),
+            CheckRequest {
+                slice: vec![PathBuf::from(root)],
+                ..CheckRequest::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.phases[0].diagnostics.len(), 2, "{root}");
+    }
+    // Engine mode rejects the same slice before touching the (unrunnable) engine.
+    let engine = Engine {
+        executable: dir.path().join("no-such-godot"),
+        version: "4.x".into(),
+        fingerprint: "none".into(),
+        source: SelectionSource::CommandLine,
+    };
+    let workspace = Workspace::open(dir.path()).unwrap();
+    let request = CheckRequest {
+        slice: vec![PathBuf::from("typo.gd")],
+        ..CheckRequest::default()
+    };
+    let result = check::run(&workspace, Some(&engine), &request, &mut NoObserver);
+    assert!(
+        matches!(result, Err(gdproject::Error::Invalid(ref m)) if m.contains("typo.gd")),
+        "{result:?}"
+    );
+    assert!(matches!(
+        check::validate(&workspace, &request),
+        Err(gdproject::Error::Invalid(_))
+    ));
+    assert!(!workspace.state_dir().join("artifacts").exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn slice_through_a_symlink_is_rejected() {
+    let dir = project(&[("real/x.gd", "extends Node\n")]);
+    std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+    for entry in ["link", "link/x.gd"] {
+        let result = static_check(
+            dir.path(),
+            CheckRequest {
+                slice: vec![PathBuf::from(entry)],
+                ..CheckRequest::default()
+            },
+        );
+        assert!(
+            matches!(result, Err(gdproject::Error::Invalid(_))),
+            "{entry}: {result:?}"
         );
     }
 }
@@ -342,11 +438,12 @@ fn slice_builds_minimal_project_and_rejects_bad_paths() {
         dir.path(),
         &engine,
         CheckRequest {
-            slice: vec!["selected".into()],
+            // Normalized once, then used for both static analysis and the copy.
+            slice: vec!["./selected/.".into()],
             ..CheckRequest::default()
         },
     );
-    assert_eq!(report.outcome, Outcome::Passed);
+    assert_eq!(report.outcome, Outcome::Passed, "{report:#?}");
     let manifest: Vec<String> = serde_json::from_slice(
         &fs::read(report.artifact_dir.unwrap().join("manifest.json")).unwrap(),
     )
@@ -387,7 +484,8 @@ fn project_script_timeout_is_recorded_as_timeout_and_stops_further_runtime_phase
         phase(&report, "project_script:1:res://b.gd"),
         PhaseOutcome::Skipped
     );
-    assert_eq!(report.counts.unwrap().project_scripts_run, 1);
+    // A script killed at its deadline did not run to exit.
+    assert_eq!(report.counts.unwrap().project_scripts_run, 0);
 }
 
 #[test]
@@ -421,8 +519,22 @@ fn static_findings_fail_the_check_before_any_engine_phase_runs() {
         [
             ("static_analysis", PhaseOutcome::Failed),
             ("import", PhaseOutcome::Skipped),
+            ("import_scan", PhaseOutcome::Skipped),
+            ("class_cache_audit", PhaseOutcome::Skipped),
             ("resource_loading", PhaseOutcome::Skipped),
             ("project_script:0:res://t.gd", PhaseOutcome::Skipped),
+        ]
+    );
+    let kinds: Vec<_> = report.phases.iter().map(|p| p.id.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            PhaseKind::StaticAnalysis,
+            PhaseKind::Import,
+            PhaseKind::Import,
+            PhaseKind::ClassCacheAudit,
+            PhaseKind::ResourceLoading,
+            PhaseKind::ProjectScript,
         ]
     );
     assert!(
@@ -494,6 +606,144 @@ fn baseline_classifies_new_carried_and_resolved_by_identity_not_line() {
 }
 
 #[test]
+fn baseline_counts_occurrences_per_identity() {
+    let keep = "const K{} = preload(\"res://keep_missing.tscn\")\n";
+    let source = |n: usize| {
+        let mut text = "extends Node\n".to_string();
+        for i in 0..n {
+            text += &keep.replace("{}", &i.to_string());
+        }
+        text
+    };
+    let dir = project(&[("a.gd", &source(1))]);
+    let one = static_check(dir.path(), CheckRequest::default()).unwrap();
+    // A second occurrence of a known finding (same identity, other line) is new.
+    write(dir.path(), &[("a.gd", &source(2))]);
+    let two = static_check(
+        dir.path(),
+        CheckRequest {
+            baseline: Some(one.clone()),
+            ..CheckRequest::default()
+        },
+    )
+    .unwrap();
+    let comparison = two.baseline.as_ref().unwrap();
+    assert_eq!(
+        (
+            comparison.new.len(),
+            comparison.carried.len(),
+            comparison.resolved.len()
+        ),
+        (1, 1, 0)
+    );
+    assert_eq!(comparison.new[0].identity, comparison.carried[0].identity);
+    // Against a baseline with two, one remaining occurrence resolves exactly one.
+    write(dir.path(), &[("a.gd", &source(1))]);
+    let back = static_check(
+        dir.path(),
+        CheckRequest {
+            baseline: Some(two.clone()),
+            ..CheckRequest::default()
+        },
+    )
+    .unwrap();
+    let comparison = back.baseline.unwrap();
+    assert_eq!(
+        (
+            comparison.new.len(),
+            comparison.carried.len(),
+            comparison.resolved.len()
+        ),
+        (0, 1, 1)
+    );
+    write(dir.path(), &[("a.gd", "extends Node\n")]);
+    let clean = static_check(
+        dir.path(),
+        CheckRequest {
+            baseline: Some(two),
+            ..CheckRequest::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(clean.baseline.unwrap().resolved.len(), 2);
+}
+
+#[test]
+#[cfg(feature = "test-engine")]
+fn repeated_known_static_finding_still_blocks_engine_phases() {
+    let line = "const A = preload(\"res://missing.tscn\")\n";
+    let dir = project(&[("a.gd", &format!("extends Node\n{line}"))]);
+    let baseline = static_check(dir.path(), CheckRequest::default()).unwrap();
+    write(
+        dir.path(),
+        &[(
+            "a.gd",
+            &format!("extends Node\n{line}{}", line.replace("const A", "const B")),
+        )],
+    );
+    let (fake_dir, engine) = fake(serde_json::json!({}));
+    let report = engine_check(
+        dir.path(),
+        &engine,
+        CheckRequest {
+            baseline: Some(baseline),
+            ..CheckRequest::default()
+        },
+    );
+    assert_eq!(report.outcome, Outcome::Failed);
+    assert!(
+        report.phases[1..]
+            .iter()
+            .all(|p| p.outcome == PhaseOutcome::Skipped),
+        "{report:#?}"
+    );
+    assert!(!fake_dir.path().join("godot.log").exists());
+    let comparison = report.baseline.unwrap();
+    assert_eq!((comparison.new.len(), comparison.carried.len()), (1, 1));
+}
+
+#[test]
+#[cfg(feature = "test-engine")]
+fn shutdown_noise_is_reported_but_never_fails_a_phase() {
+    let noise = "ERROR: 1 resources still in use at exit (run with --verbose for details).\n";
+    let dir = project(&[("t.gd", "extends SceneTree\n")]);
+    let (_fake, engine) = fake(serde_json::json!({
+        "check": {"stderr": noise},
+        "script_bootstrap": {"stderr": noise},
+    }));
+    let report = engine_check(
+        dir.path(),
+        &engine,
+        CheckRequest {
+            scripts: vec![gdview::ResPath::parse("res://t.gd").unwrap()],
+            ..CheckRequest::default()
+        },
+    );
+    assert_eq!(report.outcome, Outcome::Passed, "{report:#?}");
+    assert!(report.failures.is_empty());
+    for id in ["resource_loading", "project_script:0:res://t.gd"] {
+        let phase = report.phases.iter().find(|p| p.id.id == id).unwrap();
+        assert_eq!(phase.outcome, PhaseOutcome::Completed, "{id}");
+        assert!(
+            phase
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.is_shutdown_noise),
+            "{id}: noise must still be reported"
+        );
+    }
+    assert_eq!(report.counts.unwrap().project_scripts_run, 1);
+    // A real error next to the noise still fails.
+    let (_fake, engine) = fake(serde_json::json!({
+        "check": {"stderr": format!("{noise}ERROR: real problem\n")},
+    }));
+    let report = engine_check(dir.path(), &engine, CheckRequest::default());
+    assert_eq!(report.outcome, Outcome::Failed);
+    assert_eq!(report.failures.len(), 1);
+    assert!(report.failures[0].message.contains("real problem"));
+}
+
+#[test]
 #[ignore = "deferred: check orchestration does not load an API index; API-cache enrichment is a separate workstream"]
 fn suggestions_are_attached_only_when_an_api_index_is_cached() {
     panic!("API-cache enrichment is intentionally not implemented or claimed by check");
@@ -541,7 +791,7 @@ fn artifacts_hold_raw_streams_and_event_log_for_every_phase() {
 }
 
 #[test]
-fn report_json_round_trips_and_exit_mapping_is_0_1_2() {
+fn report_json_round_trips_and_outcomes_map_to_exit_0_or_1() {
     let dir = project(&[("main.tscn", BROKEN_SCENE), ("ok.gd", "extends Node\n")]);
     let failed = static_check(dir.path(), CheckRequest::default()).unwrap();
     let json = serde_json::to_string(&failed).unwrap();
@@ -561,9 +811,7 @@ fn report_json_round_trips_and_exit_mapping_is_0_1_2() {
     .unwrap();
     assert_eq!(passed.outcome.exit_code(), 0);
     assert_eq!(Outcome::Incomplete.exit_code(), 1);
-    // Exit 2 is a tool failure: an `Err`, never a report.
-    let not_a_project = tempfile::tempdir().unwrap();
-    assert!(Workspace::open(not_a_project.path()).is_err());
+    // Exit 2 (tool errors are an `Err`, never a report) is covered by the gdkit CLI tests.
 }
 
 #[test]
@@ -1015,7 +1263,9 @@ func _exit_tree() -> void:
 
 #[test]
 #[cfg(feature = "test-engine")]
-fn operational_error_envelopes_are_incomplete_but_script_load_and_base_are_failed() {
+fn operational_error_envelopes_are_incomplete_but_load_failures_are_failed() {
+    // `load` means the harness ran and the project's scripts failed to load
+    // (import_scan) or the requested script did not load/qualify (bootstrap).
     for (harness, stages) in [
         (
             "import_scan",
@@ -1043,8 +1293,10 @@ fn operational_error_envelopes_are_incomplete_but_script_load_and_base_are_faile
                     ..CheckRequest::default()
                 },
             );
-            let validation_failure =
-                harness == "script_bootstrap" && matches!(stage, "load" | "base");
+            let validation_failure = matches!(
+                (harness, stage),
+                ("script_bootstrap", "load" | "base") | ("import_scan", "load")
+            );
             assert_eq!(
                 report.outcome,
                 if validation_failure {

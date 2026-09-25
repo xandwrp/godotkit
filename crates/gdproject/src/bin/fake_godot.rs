@@ -1,8 +1,10 @@
 //! Offline, scenario-driven stand-in for Godot (build with `test-engine`).
 //!
 //! # Scenario schema
-//! `FAKE_GODOT_SCENARIO` is a JSON object (not a filename), or, when absent,
-//! `<current_executable>.scenario.json` is read. A missing sidecar means `{}`.
+//! The scenario is the JSON object in `<current_executable>.scenario.json`; a
+//! missing sidecar means `{}`. There are deliberately no environment overrides:
+//! tests copy the executable per test, and an inherited variable must never
+//! change what a test observes.
 //! Keys are `help`, `probe`, `--import`, `import_scan`, `check`, and
 //! `script_bootstrap:<res://path>`, with fallback to `script_bootstrap`.
 //! Selection uses flags before `--`, the `--script` filename stem, and the first
@@ -56,7 +58,8 @@
 //! control characters; [] is valid. Bad arguments/manifests/extensions emit an
 //! error envelope with stage arguments/manifest/extensions and default exit 2;
 //! file errors include the input filename in error.field. `payload` overrides
-//! bypass argument and input validation, as do modes without default computation.
+//! bypass argument and input validation, as do modes without default computation,
+//! but not the real-engine invocation contracts below.
 //!
 //! Without `class_cache`, normal imports recursively scan --path for `.gd`
 //! fixtures, skipping hidden directories and symlinks. Simple top-level
@@ -65,9 +68,21 @@
 //! Quoted/path inheritance and complex declarations require `class_cache`.
 //! No script is executed, no assets are imported, no validation is simulated.
 //!
+//! # Real-engine invocation contracts
+//! These fail like the real harnesses even when `payload` is overridden, so a
+//! production regression cannot hide behind a lenient fake. They apply in
+//! `envelope` mode (and `hang` for bootstrap, whose marker implies a valid
+//! start); other modes are explicit failure simulations and skip them.
+//! - `probe` requires `<--path>/project.godot` and `<--path>/probe.tres` files:
+//!   otherwise a `resource` error envelope, exit 1.
+//! - `import_scan` requires `--editor` before `--`: otherwise an `editor` error
+//!   envelope, exit 2 (after default argument/manifest validation, as in Godot).
+//! - `script_bootstrap` requires exactly one user argument: otherwise an
+//!   `arguments` error envelope, exit 2, with no startup marker or configured
+//!   output.
+//!
 //! Every invocation appends one JSON array of argv (excluding argv[0]) to
-//! `FAKE_GODOT_LOG`, or `<current_executable>.log` when absent. Environment
-//! overrides sidecars independently, including when the scenario is `{}`.
+//! `<current_executable>.log`.
 //! Invalid configuration/unsupported requests print `fake-godot: ...` to stderr
 //! and exit 2. `runtime_probe`, `runtime-probe`, and FAKE_GODOT_READY_FILE are
 //! explicitly unsupported: this fake does not implement a runtime-probe server.
@@ -263,6 +278,57 @@ fn default_payload(
     }))
 }
 
+/// Preconditions the real harnesses enforce regardless of their inputs; the
+/// error carries the real exit code. See "Real-engine invocation contracts".
+fn invocation_contract(
+    harness: &str,
+    flags: &[String],
+    project: &Path,
+) -> std::result::Result<(), (HarnessError, u8)> {
+    match harness {
+        "probe"
+            if !["project.godot", "probe.tres"]
+                .iter()
+                .all(|name| project.join(name).is_file()) =>
+        {
+            Err((
+                input_error(
+                    "resource",
+                    None,
+                    "Cannot read probe project directory or load res://probe.tres",
+                ),
+                1,
+            ))
+        }
+        "import_scan" if !flags.iter().any(|flag| flag == "--editor") => Err((
+            input_error("editor", None, "Import scan requires --editor"),
+            2,
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn emit_envelope(
+    stdout: &mut impl Write,
+    harness: &str,
+    payload: Option<Value>,
+    error: Option<HarnessError>,
+) -> Result<()> {
+    let envelope = Envelope {
+        protocol: PROTOCOL_VERSION,
+        harness: harness.into(),
+        ok: error.is_none(),
+        payload,
+        error,
+    };
+    writeln!(
+        stdout,
+        "{RESULT_PREFIX}{}",
+        serde_json::to_string(&envelope)?
+    )?;
+    Ok(())
+}
+
 fn identifier(text: &str) -> bool {
     !text.is_empty()
         && text
@@ -359,13 +425,10 @@ fn run() -> Result<u8> {
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let log_path = env::var_os("FAKE_GODOT_LOG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| sidecar(&executable, ".log"));
     let mut log = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_path)?;
+        .open(sidecar(&executable, ".log"))?;
     let mut line = serde_json::to_vec(&args)?;
     line.push(b'\n');
     log.write_all(&line)?;
@@ -398,15 +461,9 @@ fn run() -> Result<u8> {
             _ => return Err("unsupported invocation (expected --help, --import, or a supported --script harness)".into()),
         }
     };
-    let text = match env::var("FAKE_GODOT_SCENARIO") {
+    let text = match fs::read_to_string(sidecar(&executable, ".scenario.json")) {
         Ok(text) => text,
-        Err(env::VarError::NotPresent) => {
-            match fs::read_to_string(sidecar(&executable, ".scenario.json")) {
-                Ok(text) => text,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => "{}".into(),
-                Err(e) => return Err(e.into()),
-            }
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => "{}".into(),
         Err(e) => return Err(e.into()),
     };
     let mut scenarios: BTreeMap<String, Scenario> = serde_json::from_str(&text)?;
@@ -438,6 +495,12 @@ fn run() -> Result<u8> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
     if harness == "script_bootstrap" && matches!(mode, Mode::Envelope | Mode::Hang) {
+        if user_args.len() != 1 {
+            let error = input_error("arguments", None, "Expected one SceneTree script path");
+            emit_envelope(&mut stdout, harness, None, Some(error))?;
+            stdout.flush()?;
+            return Ok(2);
+        }
         writeln!(stdout, "GDKIT_SCRIPT_STARTED")?;
     }
     let default_help = "--headless --no-header --editor --path --script --import --quit\n";
@@ -461,7 +524,9 @@ fn run() -> Result<u8> {
     };
     match mode {
         Mode::Envelope => {
-            if matches!(harness, "--import" | "import_scan") {
+            let contract = invocation_contract(harness, flags, project);
+            // Without --editor there is no editor filesystem scan to write a cache.
+            if harness == "--import" || (harness == "import_scan" && contract.is_ok()) {
                 if option(flags, "--path").is_none() {
                     return Err("import requires --path".into());
                 }
@@ -472,25 +537,20 @@ fn run() -> Result<u8> {
                     Some(value) => Ok(value),
                     None => default_payload(harness, project, user_args),
                 };
-                let (payload, error) = match payload {
-                    Ok(payload) => (Some(payload), None),
-                    Err(error) => {
+                let (payload, error) = match (payload, contract) {
+                    (Ok(payload), Ok(())) => (Some(payload), None),
+                    (Ok(_), Err((error, exit))) => {
+                        emit_envelope(&mut stdout, harness, None, Some(error))?;
+                        stdout.flush()?;
+                        stderr.flush()?;
+                        return Ok(exit);
+                    }
+                    (Err(error), _) => {
                         default_exit = 2;
                         (None, Some(error))
                     }
                 };
-                let envelope = Envelope {
-                    protocol: PROTOCOL_VERSION,
-                    harness: harness.into(),
-                    ok: error.is_none(),
-                    payload,
-                    error,
-                };
-                writeln!(
-                    stdout,
-                    "{RESULT_PREFIX}{}",
-                    serde_json::to_string(&envelope)?
-                )?;
+                emit_envelope(&mut stdout, harness, payload, error)?;
             }
         }
         Mode::ErrorEnvelope => {
@@ -502,18 +562,7 @@ fn run() -> Result<u8> {
                     field: None,
                 },
             };
-            let envelope = Envelope::<Value> {
-                protocol: PROTOCOL_VERSION,
-                harness: harness.into(),
-                ok: false,
-                payload: None,
-                error: Some(error),
-            };
-            writeln!(
-                stdout,
-                "{RESULT_PREFIX}{}",
-                serde_json::to_string(&envelope)?
-            )?;
+            emit_envelope(&mut stdout, harness, None, Some(error))?;
         }
         _ => {}
     }

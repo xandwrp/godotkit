@@ -7,10 +7,14 @@ pub enum Error {
     View(#[from] gdview::Error),
     #[error("{path}: {message}")]
     Config { path: PathBuf, message: String },
-    #[error("no engine configured; run `gdkit init --godot <path>`, or pass --godot or GDKIT_GODOT")]
+    #[error(
+        "no engine configured; pass --godot <path>, set GDKIT_GODOT, or add `[engine]` with `executable = \"<path>\"` to gdkit.toml"
+    )]
     NoEngine,
     #[error("Godot executable not found: {0}")]
     EngineNotFound(PathBuf),
+    #[error("Godot executable `{0}` not found on PATH")]
+    EngineNotOnPath(PathBuf),
     #[error("engine compatibility probe failed: {message}")]
     Probe { message: String, output: String },
     #[error("could not run engine: {0}")]
@@ -24,7 +28,11 @@ pub enum Error {
         source: protocol::ProtocolError,
     },
     #[error("harness {harness} failed at {stage}: {message}")]
-    Harness { harness: &'static str, stage: String, message: String },
+    Harness {
+        harness: &'static str,
+        stage: String,
+        message: String,
+    },
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,

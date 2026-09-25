@@ -10,7 +10,8 @@
 //! - `run_harness_maps_missing_envelope_to_error_protocol`
 //! - `run_harness_enforces_deadline_and_reports_timeout_with_partial_output`
 //! - `run_engine_is_the_raw_form_used_for_import_dump_and_run`
-//! - `temp_files_are_removed_after_every_outcome_including_panic`
+//! - `temp_files_are_removed_after_every_outcome`
+//! - `harness_scratch_is_removed_when_a_panic_unwinds_while_it_is_live`
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -38,6 +39,28 @@ pub enum Harness {
 }
 
 impl Harness {
+    /// Every harness, in hash order. Completeness is checked at compile time below.
+    pub const ALL: [Harness; 7] = [
+        Harness::Probe,
+        Harness::Check,
+        Harness::ImportScan,
+        Harness::ResourceSchema,
+        Harness::ResourceCreate,
+        Harness::RuntimeProbe,
+        Harness::ScriptBootstrap,
+    ];
+
+    const fn is_listed(self) -> bool {
+        let mut index = 0;
+        while index < Self::ALL.len() {
+            if Self::ALL[index] as u8 == self as u8 {
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Harness::Probe => "probe",
@@ -66,21 +89,25 @@ impl Harness {
     }
 }
 
+// The exhaustive match needs an arm per variant, and each arm's inline const
+// fails the build unless `Harness::ALL` lists that variant.
+const _: () = match Harness::Probe {
+    Harness::Probe => const { assert!(Harness::Probe.is_listed()) },
+    Harness::Check => const { assert!(Harness::Check.is_listed()) },
+    Harness::ImportScan => const { assert!(Harness::ImportScan.is_listed()) },
+    Harness::ResourceSchema => const { assert!(Harness::ResourceSchema.is_listed()) },
+    Harness::ResourceCreate => const { assert!(Harness::ResourceCreate.is_listed()) },
+    Harness::RuntimeProbe => const { assert!(Harness::RuntimeProbe.is_listed()) },
+    Harness::ScriptBootstrap => const { assert!(Harness::ScriptBootstrap.is_listed()) },
+};
+
 pub const PROTOCOL_SOURCE: &str = include_str!("harness/protocol.gd");
 
 /// Hash of every embedded harness; part of the engine probe key.
 pub fn harness_hash() -> u64 {
     let mut hash = blake3::Hasher::new();
     hash.update(PROTOCOL_SOURCE.as_bytes());
-    for harness in [
-        Harness::Probe,
-        Harness::Check,
-        Harness::ImportScan,
-        Harness::ResourceSchema,
-        Harness::ResourceCreate,
-        Harness::RuntimeProbe,
-        Harness::ScriptBootstrap,
-    ] {
+    for harness in Harness::ALL {
         hash.update(harness.name().as_bytes());
         hash.update(&(harness.source().len() as u64).to_le_bytes());
         hash.update(harness.source().as_bytes());
@@ -178,12 +205,12 @@ pub fn run_harness_raw(
     spawn.args.extend([
         OsString::from("--script"),
         files
-            .path
+            .path()
             .join(format!("{}.gd", harness.name()))
             .into_os_string(),
     ]);
     append_user_args(&mut spawn, invocation);
-    capture(&spawn, invocation.deadline)
+    capture(&spawn, invocation)
 }
 
 fn decode_completion<T: DeserializeOwned>(
@@ -254,7 +281,7 @@ fn harness_files(harness: Harness) -> crate::Result<crate::workspace::IsolatedCo
         (format!("{}.gd", harness.name()), harness.source()),
         ("protocol.gd".into(), PROTOCOL_SOURCE),
     ] {
-        let path = files.path.join(name);
+        let path = files.path().join(name);
         std::fs::write(&path, source).map_err(|source| crate::Error::Io { path, source })?;
     }
     Ok(files)
@@ -280,12 +307,14 @@ fn append_user_args(spawn: &mut crate::process::Spawn, invocation: &Invocation<'
     spawn.args.extend(invocation.user_args.iter().cloned());
 }
 
+/// Paths under the invocation's project directory (the isolated copy during
+/// `check`) are rewritten to `res://` so diagnostic identities survive runs.
 fn capture(
     spawn: &crate::process::Spawn,
-    deadline: Duration,
+    invocation: &Invocation<'_>,
 ) -> crate::Result<(Captured, Vec<Diagnostic>)> {
-    let captured = crate::process::run(spawn, deadline).map_err(crate::Error::Spawn)?;
-    let diagnostics = crate::diagnostics::parse(&captured, 0);
+    let captured = crate::process::run(spawn, invocation.deadline).map_err(crate::Error::Spawn)?;
+    let diagnostics = crate::diagnostics::parse_rooted(&captured, 0, Some(invocation.project_dir));
     Ok((captured, diagnostics))
 }
 
@@ -294,7 +323,7 @@ fn capture(
 pub fn run_engine(invocation: &Invocation<'_>) -> crate::Result<(Captured, Vec<Diagnostic>)> {
     let mut spawn = engine_spawn(invocation, true);
     append_user_args(&mut spawn, invocation);
-    capture(&spawn, invocation.deadline)
+    capture(&spawn, invocation)
 }
 
 /// Spawns the engine as the game for [`crate::run`]: `--path <project> [--headless] --script runtime_probe.gd [scene] -- <args>`.
@@ -308,7 +337,7 @@ pub fn spawn_game(
     let mut spawn = engine_spawn(invocation, false);
     spawn.args.extend([
         OsString::from("--script"),
-        files.path.join("runtime_probe.gd").into_os_string(),
+        files.path().join("runtime_probe.gd").into_os_string(),
     ]);
     append_user_args(&mut spawn, invocation);
     let mut guard = crate::process::spawn(&spawn, log).map_err(crate::Error::Spawn)?;

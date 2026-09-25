@@ -38,13 +38,13 @@ fn dump_outside_a_project_uses_an_empty_scratch_project() {
 }
 
 #[test]
-#[ignore = "requires GDKIT_TEST_GODOT"]
+#[ignore = "scaffold"]
 fn real_engine_dump_parses_and_includes_builtins_utilities_and_docs() {
     todo!()
 }
 
 #[test]
-#[ignore = "requires GDKIT_TEST_GODOT"]
+#[ignore = "scaffold"]
 fn real_engine_dump_includes_project_gdextension_classes() {
     todo!()
 }

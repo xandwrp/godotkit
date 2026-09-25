@@ -1,9 +1,9 @@
 {
-  "protocol": 1,
+  "error": null,
   "harness": "variant_contracts",
   "ok": true,
   "payload": {
-    "cases": 47,
+    "cases": 66,
     "encoded": [
       null,
       true,
@@ -263,8 +263,8 @@
       ],
       {
         "$variant": {
-          "type": "Array",
           "element": "Vector2",
+          "type": "Array",
           "value": [
             {
               "$variant": {
@@ -451,11 +451,11 @@
       },
       {
         "$resource": {
+          "class": "Resource",
           "properties": {
             "resource_local_to_scene": false,
             "resource_name": "inline"
-          },
-          "class": "Resource"
+          }
         }
       },
       {
@@ -464,14 +464,197 @@
       {
         "$resource": {
           "properties": {
+            "answer": 42,
             "resource_local_to_scene": false,
-            "resource_name": "",
-            "answer": 42
+            "resource_name": ""
           },
           "script": "res://scripted_resource.gd"
         }
-      }
+      },
+      {
+        "$variant": {
+          "type": "float",
+          "value": 3.0
+        }
+      },
+      {
+        "$variant": {
+          "type": "float",
+          "value": "-0.0"
+        }
+      },
+      {
+        "$variant": {
+          "type": "float",
+          "value": 0.0
+        }
+      },
+      {
+        "$variant": {
+          "type": "float",
+          "value": 1e+20
+        }
+      },
+      0.1,
+      [
+        {
+          "$variant": {
+            "type": "float",
+            "value": 2.0
+          }
+        },
+        2
+      ],
+      {
+        "$variant": {
+          "type": "Dictionary",
+          "value": [
+            [
+              1,
+              "int"
+            ],
+            [
+              {
+                "$variant": {
+                  "type": "float",
+                  "value": 1.0
+                }
+              },
+              "float"
+            ]
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "element": "float",
+          "type": "Array",
+          "value": [
+            {
+              "$variant": {
+                "type": "float",
+                "value": 1.0
+              }
+            },
+            2.5
+          ]
+        }
+      },
+      9007199254740991,
+      -9007199254740991,
+      {
+        "$variant": {
+          "type": "int",
+          "value": "9007199254740992"
+        }
+      },
+      {
+        "$variant": {
+          "type": "Vector2",
+          "value": [
+            {
+              "$variant": {
+                "type": "float",
+                "value": "-0.0"
+              }
+            },
+            {
+              "$variant": {
+                "type": "float",
+                "value": "nan"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "PackedFloat64Array",
+          "value": [
+            1.0,
+            {
+              "$variant": {
+                "type": "float",
+                "value": "-0.0"
+              }
+            },
+            {
+              "$variant": {
+                "type": "float",
+                "value": "inf"
+              }
+            }
+          ]
+        }
+      },
+      "bell\u0001unit\u001fdel",
+      {
+        "key\u0002": "\u001b[0m"
+      },
+      {
+        "$variant": {
+          "type": "Dictionary",
+          "value": [
+            [
+              "$variant",
+              "literal"
+            ],
+            [
+              "$resource",
+              1
+            ]
+          ]
+        }
+      },
+      [],
+      {},
+      [
+        [],
+        {}
+      ]
+    ],
+    "failures": [],
+    "type_names": [
+      "Nil",
+      "bool",
+      "int",
+      "float",
+      "String",
+      "Vector2",
+      "Vector2i",
+      "Rect2",
+      "Rect2i",
+      "Vector3",
+      "Vector3i",
+      "Transform2D",
+      "Vector4",
+      "Vector4i",
+      "Plane",
+      "Quaternion",
+      "AABB",
+      "Basis",
+      "Transform3D",
+      "Projection",
+      "Color",
+      "StringName",
+      "NodePath",
+      "RID",
+      "Object",
+      "Callable",
+      "Signal",
+      "Dictionary",
+      "Array",
+      "PackedByteArray",
+      "PackedInt32Array",
+      "PackedInt64Array",
+      "PackedFloat32Array",
+      "PackedFloat64Array",
+      "PackedStringArray",
+      "PackedVector2Array",
+      "PackedVector3Array",
+      "PackedColorArray",
+      "PackedVector4Array"
     ]
   },
-  "error": null
+  "protocol": 1
 }

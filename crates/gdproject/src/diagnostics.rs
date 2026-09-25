@@ -13,8 +13,15 @@
 //! - `unresolved_uid_is_extracted_from_message`
 //! - `identity_ignores_line_and_occurrences_but_keeps_message_and_resource`
 //! - `suggestions_for_nonexistent_function_come_from_the_api_index`
+//! - `unrecognized_lines_end_a_block_so_shader_frames_never_attach_elsewhere`
+//! - `copy_root_paths_are_rewritten_to_res_in_messages_and_frames`
+//! - `embedded_resource_locations_fill_fields_and_leave_identity_stable`
+//! - `mentioned_resources_let_ignore_rules_match_engine_messages`
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Range;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -60,7 +67,7 @@ pub struct Diagnostic {
     pub sequence: u64,
     pub severity: Severity,
     pub stream: Stream,
-    /// `SCRIPT_ERROR`, `GDKIT_SCRIPT_CLASS_CACHE`, … when known.
+    /// `SCRIPT_ERROR`, `SHADER_ERROR`, `GDKIT_SCRIPT_CLASS_CACHE`, … when known.
     pub code: Option<String>,
     pub message: String,
     pub resource: Option<String>,
@@ -80,7 +87,8 @@ pub struct Diagnostic {
 impl Diagnostic {
     /// blake3 over severity, code, message, and resource; hex, 16 chars.
     /// Line, column, occurrences, and sequence are excluded so an edit that
-    /// moves a diagnostic does not make it "new".
+    /// moves a diagnostic does not make it "new". That includes a line number
+    /// the engine embeds in the message (`res://a.tres:4 - Parse Error: …`).
     pub fn compute_identity(&self) -> String {
         let mut hasher = blake3::Hasher::new();
         let severity = match self.severity {
@@ -90,7 +98,7 @@ impl Diagnostic {
         for part in [
             severity,
             self.code.as_deref().unwrap_or(""),
-            &self.message,
+            &line_free_message(&self.message),
             self.resource.as_deref().unwrap_or(""),
         ] {
             hasher.update(&(part.len() as u64).to_le_bytes());
@@ -184,7 +192,28 @@ fn edit_distance(left: &str, right: &str) -> usize {
 }
 
 /// Parses every header line and its frames. Duplicates collapse into `occurrences`.
+/// Same as [`parse_rooted`] without a project copy to map back to `res://`.
 pub fn parse(captured: &Captured, sequence_base: u64) -> Vec<Diagnostic> {
+    parse_rooted(captured, sequence_base, None)
+}
+
+/// [`parse`] for output of an engine run with `--path copy_root`. Absolute
+/// paths inside that per-run copy (e.g. GDExtension `Can't open dynamic
+/// library: /tmp/gdkit-…/bin/x.so`) are rewritten to `res://…` in messages and
+/// frame resources, so identities and ignore rules survive across runs.
+///
+/// A diagnostic's `resource`/`line` come from, in order: a location the engine
+/// embeds in a text-resource or ConfigFile parse error, the first `res://`
+/// frame, then the first `res://` path the message mentions (no line).
+///
+/// A block is a header followed by frames on the same stream; blank lines and
+/// `… backtrace (most recent call first):` continue it, any other line ends it.
+pub fn parse_rooted(
+    captured: &Captured,
+    sequence_base: u64,
+    copy_root: Option<&Path>,
+) -> Vec<Diagnostic> {
+    let roots = copy_root.map(root_spellings).unwrap_or_default();
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     let mut active = [None, None];
     for event in &captured.lines {
@@ -195,26 +224,40 @@ pub fn parse(captured: &Captured, sequence_base: u64) -> Vec<Diagnostic> {
         let text = event.text();
         for line in text.lines() {
             if let Some((severity, code, message)) = diagnostic_header(line) {
+                let message = rewrite_roots(message, &roots).into_owned();
+                let (resource, line) = match embedded_location(&message) {
+                    Some(location) => (
+                        Some(message[location.resource].to_owned()),
+                        Some(location.line),
+                    ),
+                    None => (None, None),
+                };
                 active[stream_index] = Some(diagnostics.len());
                 diagnostics.push(Diagnostic {
                     sequence: sequence_base.saturating_add(event.sequence as u64),
                     severity,
                     stream: event.stream.into(),
                     code: code.map(str::to_owned),
-                    message: message.to_owned(),
-                    resource: None,
-                    line: None,
+                    is_shutdown_noise: shutdown_noise(&message),
+                    message,
+                    resource,
+                    line,
                     column: None,
                     frames: Vec::new(),
                     timestamp_unix_ms: Some(event.observed_at_unix_ms),
                     occurrences: 1,
-                    is_shutdown_noise: shutdown_noise(message),
                     identity: String::new(),
                     suggestions: Vec::new(),
                 });
-            } else if let Some(index) = active[stream_index]
-                && let Some(frame) = stack_frame(line)
-            {
+            } else if let Some(mut frame) = stack_frame(line) {
+                let Some(index) = active[stream_index] else {
+                    continue;
+                };
+                if let Some(resource) = &mut frame.resource
+                    && let Cow::Owned(rewritten) = rewrite_roots(resource, &roots)
+                {
+                    *resource = rewritten;
+                }
                 let diagnostic = &mut diagnostics[index];
                 if diagnostic.resource.is_none()
                     && frame
@@ -227,6 +270,10 @@ pub fn parse(captured: &Captured, sequence_base: u64) -> Vec<Diagnostic> {
                     diagnostic.column = frame.column;
                 }
                 diagnostic.frames.push(frame);
+            } else if !continues_block(line) {
+                // Unrecognized output (a shader listing, a print) ends the block,
+                // so later frames can never attach to an unrelated diagnostic.
+                active[stream_index] = None;
             }
         }
     }
@@ -255,6 +302,9 @@ pub fn parse(captured: &Captured, sequence_base: u64) -> Vec<Diagnostic> {
                 return None;
             }
             diagnostic.occurrences = count;
+            if diagnostic.resource.is_none() {
+                diagnostic.resource = mentioned_resource(&diagnostic.message).map(str::to_owned);
+            }
             diagnostic.identity = diagnostic.compute_identity();
             Some(diagnostic)
         })
@@ -265,6 +315,7 @@ fn diagnostic_header(line: &str) -> Option<(Severity, Option<&'static str>, &str
     let line = line.trim();
     for (prefix, severity, code) in [
         ("SCRIPT ERROR:", Severity::Error, Some("SCRIPT_ERROR")),
+        ("SHADER ERROR:", Severity::Error, Some("SHADER_ERROR")),
         ("ERROR:", Severity::Error, None),
         ("WARNING:", Severity::Warning, None),
     ] {
@@ -275,28 +326,206 @@ fn diagnostic_header(line: &str) -> Option<(Severity, Option<&'static str>, &str
     None
 }
 
+/// Non-frame lines Godot prints inside an error block.
+fn continues_block(line: &str) -> bool {
+    let line = line.trim();
+    line.is_empty() || line.ends_with("backtrace (most recent call first):")
+}
+
+/// Godot 4 exit-time leak reports (`core/object/object.cpp`, `core/io/resource.cpp`,
+/// `rid_owner.h`, `renderer_canvas_cull.cpp`, `paged_allocator.h`), plus the
+/// uncounted Godot 3 ObjectDB wording.
 fn shutdown_noise(message: &str) -> bool {
-    (message.contains("RID allocations of type") && message.ends_with("were leaked at exit."))
-        || (message.contains("RIDs of type") && message.ends_with("were leaked."))
-        || message.starts_with("ObjectDB instances leaked at exit")
+    if message.starts_with("ObjectDB instances leaked at exit")
         || message.starts_with("ObjectDB instances were leaked at exit")
-        || message.split_once(' ').is_some_and(|(count, rest)| {
-            count.parse::<u64>().is_ok() && rest.starts_with("resources still in use at exit")
-        })
+        || message.starts_with("Pages in use exist at exit in Paged")
+        || (message.starts_with("StringName: ") && message.ends_with("string names at exit."))
+    {
+        return true;
+    }
+    let Some((count, rest)) = message.split_once(' ') else {
+        return false;
+    };
+    count.bytes().all(|b| b.is_ascii_digit())
+        && !count.is_empty()
+        && ((rest.starts_with("RID allocations of type ") && rest.ends_with(" leaked at exit."))
+            || (rest.starts_with("RID of type ") && rest.ends_with(" was leaked."))
+            || (rest.starts_with("RIDs of type ") && rest.ends_with(" were leaked."))
+            || rest.starts_with("ObjectDB instance was leaked at exit")
+            || rest.starts_with("ObjectDB instances were leaked at exit")
+            || rest.starts_with("resources still in use at exit"))
+}
+
+/// A location the engine formats into the message itself.
+struct EmbeddedLocation {
+    resource: Range<usize>,
+    /// The `:N` suffix after `resource`.
+    line_suffix: Range<usize>,
+    line: u32,
+}
+
+/// `res://a.tres:4 - Parse Error: …` and `Parse Error: …. [Resource file res://a.tscn:5]`
+/// (`resource_format_text.cpp`), `ConfigFile parse error at res://a.cfg:2: …`.
+fn embedded_location(message: &str) -> Option<EmbeddedLocation> {
+    let (start, located) = if let Some((located, _)) = message.split_once(" - Parse Error: ") {
+        (0, located)
+    } else if let Some(rest) = message.strip_suffix(']')
+        && let Some((_, located)) = rest.rsplit_once("[Resource file ")
+    {
+        (rest.len() - located.len(), located)
+    } else {
+        let rest = message.strip_prefix("ConfigFile parse error at ")?;
+        let start = message.len() - rest.len();
+        // The path itself may contain ':'; the location ends at the first `:N: `.
+        let end = rest.match_indices(':').find_map(|(colon, _)| {
+            let digits = rest[colon + 1..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            (digits > 0 && rest[colon + 1 + digits..].starts_with(": "))
+                .then_some(colon + 1 + digits)
+        })?;
+        (start, &rest[..end])
+    };
+    let (resource, line) = located.rsplit_once(':')?;
+    if !resource.starts_with("res://")
+        || line.is_empty()
+        || !line.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let colon = start + resource.len();
+    Some(EmbeddedLocation {
+        resource: start..colon,
+        line_suffix: colon..start + located.len(),
+        line: line.parse().ok()?,
+    })
+}
+
+/// The message with any [`embedded_location`] line removed.
+fn line_free_message(message: &str) -> Cow<'_, str> {
+    match embedded_location(message) {
+        Some(location) => Cow::Owned(
+            [
+                &message[..location.line_suffix.start],
+                &message[location.line_suffix.end..],
+            ]
+            .concat(),
+        ),
+        None => Cow::Borrowed(message),
+    }
+}
+
+/// First `res://` path in the message, without quotes, trailing punctuation, or `:N`.
+fn mentioned_resource(message: &str) -> Option<&str> {
+    let start = message.find("res://")?;
+    let rest = &message[start..];
+    let quote = message[..start]
+        .chars()
+        .next_back()
+        .filter(|c| matches!(c, '\'' | '"' | '`'));
+    let path = match quote {
+        Some(quote) => rest.split(quote).next().unwrap_or(rest),
+        None => {
+            let path = rest.split(char::is_whitespace).next().unwrap_or(rest);
+            let mut path = path.trim_end_matches(['.', ',', ';', ':', ')', ']', '\'', '"']);
+            while let Some((before, line)) = path.rsplit_once(':')
+                && !line.is_empty()
+                && line.bytes().all(|b| b.is_ascii_digit())
+            {
+                path = before;
+            }
+            path
+        }
+    };
+    (path.len() > "res://".len()).then_some(path)
+}
+
+/// Spellings the engine may print for the copy root, longest first: as given,
+/// canonical, without a Windows `\\?\` prefix, and with `/` separators.
+fn root_spellings(root: &Path) -> Vec<String> {
+    let mut spellings = Vec::new();
+    let canonical = std::fs::canonicalize(root).ok();
+    for path in std::iter::once(root).chain(canonical.as_deref()) {
+        let text = path.to_string_lossy();
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+        let text = text.trim_end_matches(['/', '\\']);
+        // Never rewrite a filesystem root (or nothing) into every path.
+        if text.trim_end_matches(':').len() <= 1 {
+            continue;
+        }
+        spellings.push(text.to_owned());
+        spellings.push(text.replace('\\', "/"));
+    }
+    spellings.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    spellings.dedup();
+    spellings
+}
+
+/// Replaces whole-path occurrences of any root with `res://`. Linear per root.
+fn rewrite_roots<'a>(text: &'a str, roots: &[String]) -> Cow<'a, str> {
+    let is_name = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '+');
+    let mut text = Cow::Borrowed(text);
+    for root in roots {
+        if !text.contains(root.as_str()) {
+            continue;
+        }
+        let mut rewritten = String::with_capacity(text.len());
+        let mut copied = 0;
+        for (start, _) in text.match_indices(root.as_str()) {
+            let before = text[..start].chars().next_back();
+            let mut after = text[start + root.len()..].chars();
+            let next = after.next();
+            let whole = !before.is_some_and(|c| is_name(c) || matches!(c, '/' | '\\'))
+                && match next {
+                    None | Some('/' | '\\') => true,
+                    // A sentence-ending period, not a sibling like `gdkit-1.old`.
+                    Some('.') => after.next().is_none_or(char::is_whitespace),
+                    Some(c) => !is_name(c),
+                };
+            if !whole || start < copied {
+                continue;
+            }
+            rewritten.push_str(&text[copied..start]);
+            rewritten.push_str("res://");
+            copied = start + root.len();
+            if matches!(next, Some('/' | '\\')) {
+                copied += 1;
+            }
+        }
+        if copied > 0 {
+            rewritten.push_str(&text[copied..]);
+            text = Cow::Owned(rewritten);
+        }
+    }
+    text
 }
 
 /// Removes diagnostics matching a rule; returns how many were suppressed.
+/// Messages compare exactly, except that a line number embedded in a resource
+/// parse error is ignored on both sides, as in [`Diagnostic::compute_identity`].
 #[allow(clippy::ptr_arg)] // removal needs the Vec
 pub fn apply_ignore_rules(diagnostics: &mut Vec<Diagnostic>, rules: &[IgnoreRule]) -> usize {
     let before = diagnostics.len();
+    let rules: Vec<_> = rules
+        .iter()
+        .filter_map(|rule| {
+            let (severity, code, message) = diagnostic_header(&rule.message)?;
+            Some((
+                severity,
+                code,
+                line_free_message(message),
+                rule.source.as_str(),
+            ))
+        })
+        .collect();
     diagnostics.retain(|diagnostic| {
-        !rules.iter().any(|rule| {
-            diagnostic_header(&rule.message).is_some_and(|(severity, code, message)| {
-                severity == diagnostic.severity
-                    && code == diagnostic.code.as_deref()
-                    && message == diagnostic.message
-                    && diagnostic.resource.as_deref() == Some(rule.source.as_str())
-            })
+        let message = line_free_message(&diagnostic.message);
+        !rules.iter().any(|(severity, code, rule_message, source)| {
+            *severity == diagnostic.severity
+                && *code == diagnostic.code.as_deref()
+                && *rule_message == message
+                && diagnostic.resource.as_deref() == Some(*source)
         })
     });
     before - diagnostics.len()

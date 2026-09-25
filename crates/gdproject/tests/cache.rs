@@ -8,7 +8,7 @@ fn refresh_takes_the_lock_and_records_diagnostics() {
 }
 
 #[test]
-#[ignore = "requires GDKIT_TEST_GODOT"]
+#[ignore = "scaffold"]
 fn real_engine_refresh_persists_uid_mapping_after_move() {
     todo!()
 }

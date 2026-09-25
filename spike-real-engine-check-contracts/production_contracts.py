@@ -93,7 +93,7 @@ for policy in ['project-policy', 'strict-methods']:
 write(p / 'singleton.gd', 'extends Node\n')
 write(p / 'scripted_resource.gd', 'extends Resource\n@export var answer: int = 42\n')
 r, _ = run('variant-roundtrips', p, ROOT / 'variant_contracts.gd')
-check('47 Variant JSON roundtrips', r['exit'] == 0 and not r['errors'] and r['envelopes'][0]['payload']['cases'] == 47)
+check('66 Variant JSON roundtrips', r['exit'] == 0 and not r['errors'] and r['envelopes'][0]['payload']['cases'] == 66)
 actual_golden = r['envelopes'][0]
 write(OUT / 'protocol_actual.json', json.dumps(actual_golden, indent=2, ensure_ascii=False)+'\n')
 expected_golden = json.loads((ROOT / 'protocol_golden.json').read_text())

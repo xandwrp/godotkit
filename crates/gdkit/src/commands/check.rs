@@ -1,4 +1,4 @@
-//! `check`: workspace → (engine unless --static-only) → CheckRequest from args (+ config strict_methods, baseline file parsed as a CheckReport) → gdproject::check::run with a stderr observer (silent in JSON mode) → emit report → Exit from report.outcome.
+//! `check`: workspace → CheckRequest from args (+ config strict_methods, baseline via `check::read_baseline`, warning when it names another project) → `check::validate` → (engine unless --static-only) → gdproject::check::run with a stderr observer (silent in JSON mode) → emit report → Exit from report.outcome.
 
 use std::io::Write;
 use std::time::Duration;
@@ -19,11 +19,19 @@ pub fn run(ctx: &Context, args: CheckArgs) -> gdproject::Result<Exit> {
     let workspace = ctx.workspace(&args.project)?;
     let baseline = match &args.baseline {
         Some(path) => {
-            let text = std::fs::read_to_string(path).map_err(|source| gdproject::Error::Io {
-                path: path.clone(),
-                source,
-            })?;
-            Some(serde_json::from_str::<CheckReport>(&text)?)
+            let baseline = gdproject::check::read_baseline(path)?;
+            let canonical = |path: &std::path::Path| {
+                std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+            };
+            if canonical(&baseline.project.root) != canonical(workspace.root()) {
+                eprintln!(
+                    "warning: --baseline {} was recorded for project {}, not {}",
+                    path.display(),
+                    baseline.project.root.display(),
+                    workspace.root().display()
+                );
+            }
+            Some(baseline)
         }
         None => None,
     };
@@ -41,6 +49,8 @@ pub fn run(ctx: &Context, args: CheckArgs) -> gdproject::Result<Exit> {
         static_only: args.static_only,
         baseline,
     };
+    // Unusable requests (e.g. a missing --slice) fail before the engine is probed.
+    gdproject::check::validate(&workspace, &request)?;
     let engine = if args.static_only {
         None
     } else {
@@ -152,13 +162,18 @@ impl Human for CheckReport {
             Outcome::Failed => "FAILED",
             Outcome::Incomplete => "INCOMPLETE",
         };
+        // Every failure counts (engine diagnostics, timeouts, ...), not only static findings.
         let counts = self.counts.as_ref().map_or_else(String::new, |c| {
             format!(
-                ": {} finding(s) across {} script(s), {} scene(s), {} resource(s)",
+                " ({} static finding(s)) across {} script(s), {} scene(s), {} resource(s)",
                 c.static_findings, c.scripts, c.scenes, c.resources
             )
         });
-        writeln!(out, "check {verdict}{counts}")
+        writeln!(
+            out,
+            "check {verdict}: {} failure(s){counts}",
+            self.failures.len()
+        )
     }
 }
 

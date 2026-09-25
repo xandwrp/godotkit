@@ -31,7 +31,7 @@ remain. Check's API-cache diagnostic enrichment is explicitly deferred.
 | Tool failure vs project failure | Startup/probe/configuration errors are `Err` (exit 2). Failed or incomplete check reports, including phase timeouts, exit 1 |
 | Never mutate an authored file | `workspace::publish_new_file` is create-new only; `IsolatedCopy` and `ArtifactDir` are the only other write paths; probe metadata and artifacts use `.godot/gdkit`; check never seeds or updates the source import cache |
 | Static before dynamic | `check` runs `gdview::xref` before any engine phase; `--static-only` needs no engine at all |
-| Diagnostics have a stable identity | `Diagnostic.identity` excludes line and occurrence count, so `--baseline` survives edits |
+| Diagnostics have a stable identity | `Diagnostic.identity` excludes line (including lines embedded in resource parse messages) and occurrence count, and scratch-copy paths are rewritten to `res://`, so `--baseline` survives edits and runs |
 | Platform scope is explicit | Runtime verified on Linux; macOS shares POSIX code but is not runtime-verified here. Windows Job objects are out of scope; no Windows process-tree cleanup guarantee |
 
 ## Application flows
@@ -138,7 +138,8 @@ Envelope-based harnesses emit one result line on stdout: `GDKIT_RESULT:` + JSON
 ```
 
 `script_bootstrap` is the exception: it emits `GDKIT_SCRIPT_STARTED` before
-`set_script` (including the target's `_init`), then calls its `_initialize`.
+`set_script` (including the target's `_init`), then calls its `_initialize` when
+the script defines one.
 There is no success envelope. User scripts must call `quit` before the deadline;
 check validates the startup marker, process exit, and diagnostics. Bootstrap
 failures before handoff use an error envelope. A phase timeout, crash, or
@@ -167,7 +168,7 @@ or Windows process-lifecycle guarantees.
 | gdproject::engine, runner, api, check, run | `fake-godot` with per-executable scenario/log sidecars; asserts exact argv, envelopes, timeouts, artifacts | `real_engine_*`: harness correctness, golden fixtures, the GDExtension-in-dump question |
 | gdproject::protocol, diagnostics, workspace, config | pure | `protocol_gd` golden refresh |
 | gdproject::resource, probe, cache | validation, echo mismatch, staging cleanup, fake TCP responder, lock | round-trip every Variant type; probe under script error |
-| gdkit | drives the binary; JSON purity, exit codes; engine tests automatically build the fake helper once via isolated offline Cargo (three-minute deadline) | none |
+| gdkit | drives the binary; JSON purity, exit codes; engine tests build the fake helper once per run via offline Cargo into `target/tmp` (reused across runs; three-minute deadline) | none |
 
 Test names in `tests/*.rs` are the acceptance checklist and are repeated in each
 module's doc comment. Implemented module gates have complete tests, not blanket

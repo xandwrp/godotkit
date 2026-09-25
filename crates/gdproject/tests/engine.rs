@@ -169,6 +169,34 @@ fn cache_misses_when_engine_size_or_mtime_or_harness_hash_changes() {
 }
 
 #[test]
+#[cfg(unix)]
+fn cache_misses_when_engine_is_replaced_with_same_size_and_mtime() {
+    let f = Fixture::new();
+    let (original, _) = f.attach().unwrap();
+    let before = fs::metadata(&f.selection.executable).unwrap();
+    // `cp -p` / archive extraction: identical bytes, size and mtime, new file.
+    let replacement = f.dir.path().join("replacement");
+    copy_engine(&f.selection.executable, &replacement);
+    fs::File::open(&replacement)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    fs::rename(&replacement, &f.selection.executable).unwrap();
+    let after = fs::metadata(&f.selection.executable).unwrap();
+    assert_eq!(
+        (after.len(), after.modified().unwrap()),
+        (before.len(), before.modified().unwrap())
+    );
+    assert_eq!(
+        probe_cache_health(&f.selection.executable, &f.workspace),
+        ProbeCacheHealth::Stale
+    );
+    let (replaced, hit) = f.attach().unwrap();
+    assert!(!hit);
+    assert_ne!(original.fingerprint, replaced.fingerprint);
+}
+
+#[test]
 fn cache_is_not_written_when_probe_fails_or_engine_changes_mid_probe() {
     let f = Fixture::new();
     f.scenario(json!({"probe": {"mode": "error_envelope", "stderr": "resource failed\n"}}));
@@ -238,26 +266,42 @@ fn probe_rejects_non_editor_or_non_4x_builds() {
 
 #[test]
 fn probe_respects_deadline() {
+    // Deadlines leave a loaded machine ample time to spawn the fake and flush its
+    // output; a hanging stage never finishes, so any return proves the deadline.
     for stage in ["help", "probe"] {
         let f = Fixture::new();
         f.scenario(json!({stage: {"mode":"hang", "stdout":"partial stdout\n", "stderr":"partial stderr\n"}}));
+        let deadline = Duration::from_millis(1500);
         let start = Instant::now();
         let output = assert_probe_error(
-            probe(&f.selection.executable, Duration::from_millis(150)).unwrap_err(),
+            probe(&f.selection.executable, deadline).unwrap_err(),
             "deadline",
         );
-        assert!(start.elapsed() < Duration::from_secs(3));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= deadline && elapsed < deadline + Duration::from_secs(5),
+            "{elapsed:?}"
+        );
         assert!(output.contains("partial stdout"));
         assert!(output.contains("partial stderr"));
     }
+    // One budget spans both stages. Help finishes well within it; the probe stage
+    // gets only the remainder. A per-stage deadline would return after
+    // help + deadline (3.5 s) and no deadline after help + probe (6 s), so the
+    // bound keeps ~0.9 s of scheduling slack while still telling them apart.
     let f = Fixture::new();
-    f.scenario(json!({"help":{"delay_ms":300}, "probe":{"delay_ms":500}}));
+    f.scenario(json!({"help":{"delay_ms":1000}, "probe":{"delay_ms":5000}}));
+    let deadline = Duration::from_millis(2500);
     let start = Instant::now();
     assert_probe_error(
-        probe(&f.selection.executable, Duration::from_millis(600)).unwrap_err(),
+        probe(&f.selection.executable, deadline).unwrap_err(),
         "deadline",
     );
-    assert!(start.elapsed() < Duration::from_millis(780));
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= deadline && elapsed < Duration::from_millis(3400),
+        "{elapsed:?}"
+    );
     assert_eq!(f.calls().len(), 2);
     let f = Fixture::new();
     assert_probe_error(

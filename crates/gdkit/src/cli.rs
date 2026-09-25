@@ -24,36 +24,69 @@ pub enum Output {
 /// Shared by every project command.
 #[derive(Debug, Args, Clone)]
 pub struct ProjectArgs {
-    #[arg(long, default_value = ".", help = "Project directory or any path inside it")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Project directory or any path inside it"
+    )]
     pub project: PathBuf,
-    #[arg(long, value_name = "PATH", help = "Godot editor executable (overrides GDKIT_GODOT and gdkit.toml)")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Godot editor executable (overrides GDKIT_GODOT and gdkit.toml)"
+    )]
     pub godot: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Associate the project with an engine (writes gdkit.toml).
-    Init { #[command(flatten)] project: ProjectArgs },
+    Init {
+        #[command(flatten)]
+        project: ProjectArgs,
+    },
     /// Explain the resolved engine, config, caches, and warning policy.
-    Doctor { #[command(flatten)] project: ProjectArgs },
+    Doctor {
+        #[command(flatten)]
+        project: ProjectArgs,
+    },
     /// Static cross-reference checks, then import a disposable copy and load everything.
     Check(CheckArgs),
     /// Query the engine API (classes, builtins, utilities) and the project's class_name scripts.
     Api(ApiArgs),
     /// Everything that references a project file (offline).
-    Refs { #[command(flatten)] project: ProjectArgs, #[arg(value_name = "RES")] path: String },
+    Refs {
+        #[command(flatten)]
+        project: ProjectArgs,
+        #[arg(value_name = "RES")]
+        path: String,
+    },
     /// Typed views of project.godot (offline).
-    Settings { #[command(flatten)] project: ProjectArgs, #[command(subcommand)] what: SettingsCommand },
+    Settings {
+        #[command(flatten)]
+        project: ProjectArgs,
+        #[command(subcommand)]
+        what: SettingsCommand,
+    },
     /// Discover schemas and create verified .tres files from JSON.
-    Resource { #[command(subcommand)] command: ResourceCommand },
+    Resource {
+        #[command(subcommand)]
+        command: ResourceCommand,
+    },
     /// Print a text scene's node tree (offline).
     SceneTree(SceneTreeArgs),
     /// Print autoloads in initialization order (offline).
-    Autoloads { #[command(flatten)] project: ProjectArgs },
+    Autoloads {
+        #[command(flatten)]
+        project: ProjectArgs,
+    },
     /// Static multiplayer topology report (offline).
     Net(NetArgs),
     /// Refresh Godot's derived caches with a headless editor import.
-    Import { #[command(flatten)] project: ProjectArgs },
+    Import {
+        #[command(flatten)]
+        project: ProjectArgs,
+    },
     /// Run a scene to a frame count or checkpoint condition and report.
     Run(RunArgs),
 }
@@ -62,19 +95,31 @@ pub enum Command {
 pub struct CheckArgs {
     #[command(flatten)]
     pub project: ProjectArgs,
-    #[arg(long, value_name = "PATH", help = "Check only these files/dirs (repeatable, project-relative)")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Check only these files/dirs (repeatable, project-relative)"
+    )]
     pub slice: Vec<PathBuf>,
     #[arg(long, help = "Static cross-reference checks only; no engine")]
     pub static_only: bool,
     #[arg(long)]
     pub strict_methods: bool,
-    #[arg(long, value_name = "RES", help = "Run this SceneTree script after validation (repeatable)")]
+    #[arg(
+        long,
+        value_name = "RES",
+        help = "Run this SceneTree script after validation (repeatable)"
+    )]
     pub script: Vec<String>,
     #[arg(long, default_value = "30", value_parser = clap::value_parser!(u64).range(1..=3600))]
     pub script_timeout: u64,
-    #[arg(long, default_value = "600", help = "Seconds allowed for each import/load phase")]
+    #[arg(long, default_value = "600", value_parser = clap::value_parser!(u64).range(1..=86400), help = "Seconds allowed for each import/load phase")]
     pub phase_timeout: u64,
-    #[arg(long, value_name = "REPORT.json", help = "Classify diagnostics as new/carried/resolved against this report")]
+    #[arg(
+        long,
+        value_name = "REPORT.json",
+        help = "Classify diagnostics as new/carried/resolved against this report"
+    )]
     pub baseline: Option<PathBuf>,
     #[arg(long, help = "Print full engine output to stderr")]
     pub verbose: bool,
@@ -151,15 +196,31 @@ pub struct NetArgs {
 pub struct RunArgs {
     #[command(flatten)]
     pub project: ProjectArgs,
-    #[arg(long, value_name = "RES", help = "Scene to run (default: the project main scene)")]
+    #[arg(
+        long,
+        value_name = "RES",
+        help = "Scene to run (default: the project main scene)"
+    )]
     pub scene: Option<String>,
     #[arg(long, help = "Run with a window (default headless)")]
     pub windowed: bool,
-    #[arg(long, default_value = "120", help = "Stop after this many process frames")]
+    #[arg(
+        long,
+        default_value = "120",
+        help = "Stop after this many process frames"
+    )]
     pub frames: u64,
-    #[arg(long, value_name = "/pointer=value", help = "Stop when this checkpoint equals the value")]
+    #[arg(
+        long,
+        value_name = "/pointer=value",
+        help = "Stop when this checkpoint equals the value"
+    )]
     pub until: Option<String>,
-    #[arg(long, default_value = "60", help = "Wall-clock seconds for the whole run")]
+    #[arg(
+        long,
+        default_value = "60",
+        help = "Wall-clock seconds for the whole run"
+    )]
     pub timeout: u64,
     #[arg(long, default_value = "20")]
     pub ready_timeout: u64,

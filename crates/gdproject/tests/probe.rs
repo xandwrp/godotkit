@@ -32,13 +32,13 @@ fn network_observation_decodes_peers_authority_and_inventory() {
 }
 
 #[test]
-#[ignore = "requires GDKIT_TEST_GODOT"]
+#[ignore = "scaffold"]
 fn real_engine_probe_reports_ready_and_answers_every_query() {
     todo!()
 }
 
 #[test]
-#[ignore = "requires GDKIT_TEST_GODOT"]
+#[ignore = "scaffold"]
 fn real_engine_script_error_does_not_freeze_the_probe() {
     todo!()
 }

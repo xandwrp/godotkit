@@ -7,12 +7,16 @@
 //! - `checkpoint_adapter_must_be_res_gd_without_dot_dot`
 //! - `select_engine_precedence_is_flag_then_env_then_config`
 //! - `relative_engine_paths_resolve_against_the_config_file`
-//! - `write_initial_refuses_to_overwrite_and_stores_relative_path`
+//! - `bare_names_are_looked_up_on_path_and_paths_with_separators_are_not`
+//! - `path_lookup_skips_files_that_are_not_executable`
+//! - `write_initial_refuses_to_overwrite_and_stores_the_path_as_given`
+//! - `write_initial_stores_bare_names_bare_for_path_lookup`
+//! - `write_initial_keeps_symlinks_and_the_absolute_path_as_given`
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +36,8 @@ pub struct Config {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineConfig {
-    /// Relative paths resolve against the directory containing `gdkit.toml`.
+    /// A bare name (`godot`) is looked up on `PATH`; relative paths resolve
+    /// against the directory containing `gdkit.toml`.
     pub executable: PathBuf,
 }
 
@@ -112,11 +117,12 @@ impl Config {
 
     /// Semantic validation beyond serde: rule shapes, adapter path.
     pub fn validate(&self, path: &Path) -> crate::Result<()> {
-        if self
-            .engine
-            .as_ref()
-            .is_some_and(|engine| engine.executable.as_os_str().is_empty())
-        {
+        if self.engine.as_ref().is_some_and(|engine| {
+            engine
+                .executable
+                .to_str()
+                .is_some_and(|text| text.trim().is_empty())
+        }) {
             return Err(config_error(path, "engine.executable must not be empty"));
         }
         for (index, rule) in self.check.ignore_import_errors.iter().enumerate() {
@@ -135,29 +141,52 @@ impl Config {
                 ));
             }
         }
-        if let Some(adapter) = &self.run.checkpoint_adapter {
-            if adapter.extension() != Some("gd") {
-                return Err(config_error(
-                    path,
-                    "run.checkpoint_adapter must name a res:// .gd script without .. segments",
-                ));
-            }
+        if let Some(adapter) = &self.run.checkpoint_adapter
+            && adapter.extension() != Some("gd")
+        {
+            return Err(config_error(
+                path,
+                "run.checkpoint_adapter must name a res:// .gd script without .. segments",
+            ));
         }
         Ok(())
     }
 
-    /// Writes a fresh config pinning `engine`. Fails if the file exists.
+    /// Writes a fresh config pinning `engine` as the user supplied it (the raw
+    /// `--godot`/`GDKIT_GODOT` value, not the canonical [`EngineSelection`]).
+    /// Fails if the file exists or `engine` does not resolve to an existing file.
+    ///
+    /// The stored `engine.executable` stays portable across checkouts and machines,
+    /// and symlinks are never resolved, so version-manager shims and aliases such as
+    /// `/usr/bin/godot` keep following upgrades:
+    /// - a bare name without a path separator (`godot`) is stored bare and looked
+    ///   up on `PATH` at selection;
+    /// - a path inside the project is stored project-relative with `/` separators
+    ///   (`./godot` at the project root, so it is not read back as a bare name);
+    /// - any other absolute path is stored verbatim; any other relative path is
+    ///   made absolute against the current directory.
     pub fn write_initial(root: &Path, engine: &Path) -> crate::Result<PathBuf> {
+        Self::write_initial_with_search_path(root, engine, std::env::var_os("PATH").as_deref())
+    }
+
+    /// [`Config::write_initial`] with an explicit `PATH` value for bare names.
+    pub fn write_initial_with_search_path(
+        root: &Path,
+        engine: &Path,
+        search_path: Option<&OsStr>,
+    ) -> crate::Result<PathBuf> {
         let path = root.join(CONFIG_FILE_NAME);
-        let directory = fs::canonicalize(root).map_err(|source| crate::Error::Io {
-            path: root.to_owned(),
-            source,
-        })?;
-        let engine = canonical_engine(engine)?;
+        let io_error = |path: &Path| {
+            let path = path.to_owned();
+            move |source| crate::Error::Io { path, source }
+        };
+        fs::canonicalize(root).map_err(io_error(root))?;
+        resolve_executable(engine, Path::new(""), search_path)?;
+        let executable = stored_engine_path(root, engine)
+            .map_err(io_error(engine))?
+            .ok_or_else(|| config_error(&path, "engine.executable must be valid UTF-8"))?;
         let config = Self {
-            engine: Some(EngineConfig {
-                executable: relative_path(&engine, &directory),
-            }),
+            engine: Some(EngineConfig { executable }),
             ..Self::default()
         };
         let text = toml::to_string_pretty(&config).map_err(|error| config_error(&path, error))?;
@@ -195,30 +224,57 @@ pub struct EngineSelection {
     pub source: SelectionSource,
 }
 
-/// Precedence: `explicit` > `env` (`GDKIT_GODOT`, passed in for testability) > config.
+/// Precedence: `explicit` (`--godot`) > `env` (`GDKIT_GODOT`, passed in for
+/// testability; empty or whitespace-only counts as unset) > `[engine] executable`
+/// in `gdkit.toml`.
+///
+/// The winning value is then resolved: a bare name without a path separator
+/// (`godot`) is looked up on the process `PATH` (honouring `PATHEXT` on Windows).
+/// Anything with a separator is a path: flag and environment values are relative
+/// to the current directory, config values to the directory containing
+/// `gdkit.toml`. The result is canonicalized.
 pub fn select_engine(
     root: &Path,
     explicit: Option<&Path>,
     env: Option<&OsString>,
     config: Option<&Config>,
 ) -> crate::Result<EngineSelection> {
-    let (path, source) = if let Some(explicit) = explicit {
-        (explicit.to_owned(), SelectionSource::CommandLine)
+    select_engine_with_search_path(
+        root,
+        explicit,
+        env,
+        config,
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
+/// [`select_engine`] with an explicit `PATH` value for bare names.
+pub fn select_engine_with_search_path(
+    root: &Path,
+    explicit: Option<&Path>,
+    env: Option<&OsString>,
+    config: Option<&Config>,
+    search_path: Option<&OsStr>,
+) -> crate::Result<EngineSelection> {
+    let env = env.filter(|value| !value.to_str().is_some_and(|text| text.trim().is_empty()));
+    let (value, base, source) = if let Some(explicit) = explicit {
+        (explicit, Path::new(""), SelectionSource::CommandLine)
     } else if let Some(env) = env {
-        (PathBuf::from(env), SelectionSource::Environment)
+        (Path::new(env), Path::new(""), SelectionSource::Environment)
     } else if let Some(engine) = config.and_then(|config| config.engine.as_ref()) {
         if engine.executable.as_os_str().is_empty() {
             return Err(crate::Error::EngineNotFound(engine.executable.clone()));
         }
         (
-            root.join(&engine.executable),
+            engine.executable.as_path(),
+            root,
             SelectionSource::ProjectConfig,
         )
     } else {
         return Err(crate::Error::NoEngine);
     };
     Ok(EngineSelection {
-        executable: canonical_engine(&path)?,
+        executable: resolve_executable(value, base, search_path)?,
         source,
     })
 }
@@ -254,6 +310,20 @@ fn reject_unknown_keys(
     Ok(())
 }
 
+/// Bare names use `search_path`; other relative paths are joined to `base`.
+fn resolve_executable(
+    value: &Path,
+    base: &Path,
+    search_path: Option<&OsStr>,
+) -> crate::Result<PathBuf> {
+    if is_bare_name(value) {
+        let found = find_on_path(value.as_os_str(), search_path)
+            .ok_or_else(|| crate::Error::EngineNotOnPath(value.to_owned()))?;
+        return canonical_engine(&found);
+    }
+    canonical_engine(&base.join(value))
+}
+
 fn canonical_engine(path: &Path) -> crate::Result<PathBuf> {
     let canonical =
         fs::canonicalize(path).map_err(|_| crate::Error::EngineNotFound(path.to_owned()))?;
@@ -263,24 +333,116 @@ fn canonical_engine(path: &Path) -> crate::Result<PathBuf> {
     Ok(canonical)
 }
 
-fn relative_path(target: &Path, base: &Path) -> PathBuf {
-    let target_parts: Vec<_> = target.components().collect();
-    let base_parts: Vec<_> = base.components().collect();
-    // Different Windows volumes cannot be represented by a relative path.
-    if target_parts.first() != base_parts.first() {
-        return target.to_owned();
-    }
-    let common = target_parts
+/// One normal component and no separator anywhere (`godot`, not `./godot` or `godot/`).
+fn is_bare_name(path: &Path) -> bool {
+    let mut components = path.components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    ) && !path
+        .as_os_str()
+        .as_encoded_bytes()
         .iter()
-        .zip(&base_parts)
-        .take_while(|(a, b)| a == b)
-        .count();
-    let mut relative = PathBuf::new();
-    for _ in &base_parts[common..] {
-        relative.push("..");
+        .any(|&byte| std::path::is_separator(char::from(byte)))
+}
+
+/// A minimal `which`: the first executable file named `name` in a `PATH` entry.
+/// Empty entries are skipped rather than meaning the current directory.
+fn find_on_path(name: &OsStr, search_path: Option<&OsStr>) -> Option<PathBuf> {
+    std::env::split_paths(search_path?)
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .flat_map(|directory| path_candidates(&directory, name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(not(windows))]
+fn path_candidates(directory: &Path, name: &OsStr) -> Vec<PathBuf> {
+    vec![directory.join(name)]
+}
+
+/// Like `cmd.exe`: a name with an extension is tried as given, then every name
+/// is tried with each `PATHEXT` extension appended.
+#[cfg(windows)]
+fn path_candidates(directory: &Path, name: &OsStr) -> Vec<PathBuf> {
+    let extensions = std::env::var_os("PATHEXT")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+    let mut candidates = Vec::new();
+    if Path::new(name).extension().is_some() {
+        candidates.push(directory.join(name));
     }
-    for part in &target_parts[common..] {
-        relative.push(part.as_os_str());
+    for extension in extensions.to_string_lossy().split(';') {
+        if !extension.is_empty() {
+            let mut file = name.to_owned();
+            file.push(extension);
+            candidates.push(directory.join(file));
+        }
     }
-    relative
+    candidates
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
+/// See [`Config::write_initial`]. `None` when a project-relative path is not UTF-8.
+fn stored_engine_path(root: &Path, engine: &Path) -> std::io::Result<Option<PathBuf>> {
+    if is_bare_name(engine) {
+        return Ok(Some(engine.to_owned()));
+    }
+    let absolute = lexical_absolute(engine)?;
+    // Lexically first, so a symlinked directory inside the project stays inside
+    // it; then physically, for a project root reached through a symlink.
+    let inside = absolute
+        .strip_prefix(lexical_absolute(root)?)
+        .ok()
+        .map(Path::to_owned)
+        .or_else(|| {
+            let root = fs::canonicalize(root).ok()?;
+            let parent = fs::canonicalize(absolute.parent()?).ok()?;
+            Some(parent.strip_prefix(root).ok()?.join(absolute.file_name()?))
+        });
+    let Some(relative) = inside else {
+        return Ok(Some(if engine.is_absolute() {
+            engine.to_owned()
+        } else {
+            absolute
+        }));
+    };
+    let parts = relative
+        .components()
+        .map(|part| part.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>();
+    Ok(parts.map(|parts| {
+        let joined = parts.join("/");
+        PathBuf::from(if parts.len() == 1 {
+            format!("./{joined}")
+        } else {
+            joined
+        })
+    }))
+}
+
+/// Absolute against the current directory with `.` and `..` removed, without
+/// touching the filesystem, so symlinks are preserved.
+fn lexical_absolute(path: &Path) -> std::io::Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(normalized)
 }
