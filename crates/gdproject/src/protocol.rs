@@ -10,10 +10,13 @@
 //! - `parse_envelope_rejects_missing_duplicate_and_malformed_results`
 //! - `parse_envelope_rejects_protocol_version_mismatch_before_payload_decode`
 //! - `error_envelopes_surface_stage_and_message`
-//! - `protocol_gd_encoder_output_matches_gdview_variant_grammar` (golden JSON checked into fixtures, produced once by a real engine)
+//! - `documented_variant_json_shapes_survive_envelope_transport`
+//!
+//! Real-engine encoder compatibility additionally requires an implemented
+//! `harness/protocol.gd` and `gdview::variant` decoder and engine-produced fixtures.
 
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const RESULT_PREFIX: &str = "GDKIT_RESULT:";
@@ -52,8 +55,54 @@ pub enum ProtocolError {
 }
 
 /// Extracts and decodes the envelope from captured output lines.
+///
+/// Only a prefix at the start of a line counts. Result cardinality is checked
+/// before JSON decoding, and the protocol version before envelope or payload
+/// decoding. Invalid JSON or envelope metadata is [`ProtocolError::Malformed`];
+/// a non-null payload that cannot deserialize as `T` is [`ProtocolError::Payload`].
+/// Missing and null payloads both become `None`, as in [`Envelope`]'s serde contract.
+/// Harness failures remain envelopes; the runner interprets `ok` and `error`.
 pub fn parse_envelope<T: DeserializeOwned>(
     lines: impl Iterator<Item = String>,
 ) -> Result<Envelope<T>, ProtocolError> {
-    todo!()
+    let mut result = None;
+    for line in lines {
+        if let Some(json) = line.strip_prefix(RESULT_PREFIX) {
+            if result.is_some() {
+                return Err(ProtocolError::Multiple);
+            }
+            result = Some(json.to_owned());
+        }
+    }
+    let json = result.ok_or(ProtocolError::Missing)?;
+
+    // Read only the version first: a newer wire format may change the rest of
+    // the envelope as well as the payload.
+    #[derive(Deserialize)]
+    struct Version {
+        protocol: u32,
+    }
+    let version: Version =
+        serde_json::from_str(&json).map_err(|error| ProtocolError::Malformed(error.to_string()))?;
+    if version.protocol != PROTOCOL_VERSION {
+        return Err(ProtocolError::VersionMismatch {
+            expected: PROTOCOL_VERSION,
+            found: version.protocol,
+        });
+    }
+
+    let envelope: Envelope<serde_json::Value> =
+        serde_json::from_str(&json).map_err(|error| ProtocolError::Malformed(error.to_string()))?;
+    let payload = envelope
+        .payload
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| ProtocolError::Payload(error.to_string()))?;
+    Ok(Envelope {
+        protocol: envelope.protocol,
+        harness: envelope.harness,
+        ok: envelope.ok,
+        payload,
+        error: envelope.error,
+    })
 }
