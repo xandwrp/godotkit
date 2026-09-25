@@ -14,7 +14,9 @@ gdkit  (bin)  ──►  gdproject  ──►  gdview
 `gdkit` contains no logic; a command file that grows past ~150 lines is a smell.
 
 The command surface is exactly what [AGENT_USE.md](AGENT_USE.md) lists. Anything
-not on that page is not stubbed, on purpose.
+not on that page is not stubbed, on purpose. These flows describe the intended
+architecture: `check` is implemented end to end, but other command scaffolds
+remain. Check's API-cache diagnostic enrichment is explicitly deferred.
 
 ## Rules that are enforced by structure, not discipline
 
@@ -22,15 +24,15 @@ not on that page is not stubbed, on purpose.
 | --- | --- |
 | Every engine invocation has a deadline | `runner::Invocation.deadline` is a required field; `process::run` takes `Duration`, not `Option` |
 | No `Command::new(engine)` outside the runner | `process` is the only module that spawns; `runner` is the only module that calls `process` with an engine |
-| Nothing outlives the gdkit invocation | `process::ChildGuard` kills the tree on drop; there is no pid record anywhere |
-| Terminate always waits | `ChildGuard::terminate` returns `TerminateOutcome` after exit, escalating TERM → KILL |
+| Scoped process ownership | `process::ChildGuard` cleans up on drop: POSIX process groups (excluding escaped descendants), Windows direct child only; abrupt supervisor death bypasses drop |
+| Terminate always waits | `ChildGuard::terminate` reaps the direct child; POSIX escalates TERM → KILL, Windows kills the direct child immediately |
 | One Variant JSON grammar | `gdview::variant::VariantJson` in Rust, `harness/protocol.gd` in GDScript, golden-fixture tested against each other |
 | One result envelope, version-checked | `protocol::Envelope`; `parse_envelope` rejects a version mismatch before decoding the payload |
-| Tool failure vs project failure | `Err` = gdkit could not do its job (exit 2). `Ok(report)` with a failing verdict = exit 1 |
-| Never mutate an authored file | `workspace::publish_new_file` is create-new only; `IsolatedCopy` and `ArtifactDir` are the only other write paths; `cache::refresh` is the only writer of the real `.godot` |
+| Tool failure vs project failure | Startup/probe/configuration errors are `Err` (exit 2). Failed or incomplete check reports, including phase timeouts, exit 1 |
+| Never mutate an authored file | `workspace::publish_new_file` is create-new only; `IsolatedCopy` and `ArtifactDir` are the only other write paths; probe metadata and artifacts use `.godot/gdkit`; check never seeds or updates the source import cache |
 | Static before dynamic | `check` runs `gdview::xref` before any engine phase; `--static-only` needs no engine at all |
 | Diagnostics have a stable identity | `Diagnostic.identity` excludes line and occurrence count, so `--baseline` survives edits |
-| Platform support is explicit | `process.rs` has `compile_error!` for anything but Linux/macOS/Windows |
+| Platform scope is explicit | Runtime verified on Linux; macOS shares POSIX code but is not runtime-verified here. Windows Job objects are out of scope; no Windows process-tree cleanup guarantee |
 
 ## Application flows
 
@@ -41,24 +43,32 @@ Each numbered step names the function that owns it.
 ```
 gdkit::commands::check
   1. ctx.workspace(args)                 gdview::Project::discover → gdproject::Workspace::open
-  2. ctx.engine(ws, args)                Config::load → select_engine → Engine::attach   (skipped with --static-only)
-  3. CheckRequest::from(args, config, baseline file)
+  2. build CheckRequest from args and baseline file
+  3. ctx.engine(ws, args)                Config::load → select_engine → Engine::attach   (skipped with --static-only)
   4. gdproject::check::run(ws, engine, req, observer)
        0. static_analysis: declarations + UidMap + ProjectGraph::load → gdview::xref::analyze   phase StaticAnalysis
-       a. IsolatedCopy::full | ::slice   (copy, no .godot/.git, symlinks refused)
-       b. scan: gdview files query on the copy → manifest → ProjectIdentity.fingerprint
+       a. IsolatedCopy::full | ::slice   (source assets included, no .godot/.git or cache seeding, symlinks refused)
+       b. scan: default gdview files query on the copy → full-file manifest
        c. run_engine  --editor --quiet --import                      phase Import
-       d. run_harness ImportScan                                     phase Import (completion marker)
+       d. run_harness ImportScan --editor                            phase Import (scan/load scripts, envelope + editor extensions)
        e. class_cache_audit: gdview::declarations vs copy/.godot/global_script_class_cache.cfg
-       f. run_harness Check (manifest, policy)                       phase ResourceLoading
-       g. for --script: run_harness ScriptBootstrap (deadline)       phase ProjectScript
-       h. diagnostics::suggest with the cached api index (never dumps)
+       f. run_harness Check (manifest, policy, editor extensions)    phase ResourceLoading (editor + runtime registry union)
+       g. for --script: run_harness ScriptBootstrap (deadline)       phase ProjectScript (started marker, then process exit)
+       h. API-cache diagnostic enrichment deferred (no API load or dump)
        i. baseline: partition by identity into new / carried / resolved
        every engine phase: preserve raw streams to ArtifactDir → diagnostics::parse → apply_ignore_rules → observer
-       any failure before g skips g with a reason
+       new static findings block engine phases; baseline-carried static findings permit them but retain the failed verdict
+       failed engine phases skip all later phases with a reason
   5. render::emit(report)                stdout: human summary | one JSON doc
   6. Exit::from(report.outcome)          0 passed, 1 failed/incomplete; Err → 2
 ```
+
+The inventory is not a hardcoded resource-extension list. ImportScan hands off
+editor-recognized extensions; Check unions them with runtime loaders registered
+during autoload startup, then counts attempted loads of eligible inventory entries.
+Unknown extensions are not loaded. Raw streams and observation-order events are
+persisted before verdict interpretation; zero exit alone does not hide diagnostics
+or replace a required completion payload.
 
 ### `gdkit api`
 
@@ -120,12 +130,20 @@ settings: Project::discover → settings() → input_actions | layer_names | win
 
 ## Harness protocol
 
-One line on stdout: `GDKIT_RESULT:` + JSON
+Envelope-based harnesses emit one result line on stdout: `GDKIT_RESULT:` + JSON
 
 ```json
 {"protocol": 1, "harness": "check", "ok": true, "payload": {...}}
 {"protocol": 1, "harness": "resource_create", "ok": false, "error": {"stage": "verify", "message": "...", "field": "properties.offset"}}
 ```
+
+`script_bootstrap` is the exception: it emits `GDKIT_SCRIPT_STARTED` before
+`set_script` (including the target's `_init`), then calls its `_initialize`.
+There is no success envelope. User scripts must call `quit` before the deadline;
+check validates the startup marker, process exit, and diagnostics. Bootstrap
+failures before handoff use an error envelope. A phase timeout, crash, or
+missing/malformed completion yields an incomplete report (exit 1), whereas
+startup/probe/configuration errors yield exit 2.
 
 Payload Variants follow `gdview::variant` (`$variant`, `$ref`, `$resource`).
 `harness/protocol.gd` is written next to every harness and is the only encoder.
@@ -138,17 +156,26 @@ needs no harness; it comes from the engine's own `--dump-extension-api-with-docs
 
 ## Test matrix
 
-| Site | Offline (CI on 3 OSes) | Engine-backed (`GDKIT_TEST_GODOT`, `#[ignore]`) |
+The matrix includes intended coverage for scaffolds, not a claim that every test
+is implemented. Runtime verification is Linux-only; it does not establish macOS
+or Windows process-lifecycle guarantees.
+
+| Site | Offline | Engine-backed (`GDKIT_TEST_GODOT`, `#[ignore]`) |
 | --- | --- | --- |
 | gdview (all modules) | fixtures + strings; every test | syntax corpus (`GODOT_SOURCE`); `extension_api.json` fixture refresh |
 | gdproject::process | `sleep`/`sh`/`cmd` subjects: deadline, tree kill, log streaming, guard drop | none |
-| gdproject::engine, runner, api, check, run | `fake-godot` scripted by env vars; asserts exact argv, envelopes, timeouts, artifacts | `real_engine_*`: harness correctness, golden fixtures, the GDExtension-in-dump question |
+| gdproject::engine, runner, api, check, run | `fake-godot` with per-executable scenario/log sidecars; asserts exact argv, envelopes, timeouts, artifacts | `real_engine_*`: harness correctness, golden fixtures, the GDExtension-in-dump question |
 | gdproject::protocol, diagnostics, workspace, config | pure | `protocol_gd` golden refresh |
 | gdproject::resource, probe, cache | validation, echo mismatch, staging cleanup, fake TCP responder, lock | round-trip every Variant type; probe under script error |
-| gdkit | drives the binary; uniform flags, JSON purity, exit codes | none |
+| gdkit | drives the binary; JSON purity, exit codes; engine tests automatically build the fake helper once via isolated offline Cargo (three-minute deadline) | none |
 
 Test names in `tests/*.rs` are the acceptance checklist and are repeated in each
-module's doc comment. A module is done when its stubs are un-ignored and green.
+module's doc comment. Implemented module gates have complete tests, not blanket
+completion of all workspace scaffolds. Real-engine tests remain opt-in; explicitly
+deferred tests (including check API-cache enrichment) remain separate. Fake-engine
+tests isolate scenarios beside copied executables rather than mutating global
+environment variables. Real-engine check fixtures use clean copies with source
+assets, never pre-seeded import caches.
 
 ## Open questions
 

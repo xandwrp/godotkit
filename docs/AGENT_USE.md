@@ -3,7 +3,10 @@
 What an agent working in a Godot project with no editor open actually reaches
 for, in the order it reaches for it, and what it does with the answer. This is
 the priority list for implementation: if a command is not on this page, it can
-wait.
+wait. `check` (including engine phases, slices, baselines, and project scripts)
+is implemented; the other workflows below describe the intended surface, not a
+claim that all command scaffolds are complete. API-cache diagnostic enrichment
+for `check` remains deferred.
 
 The shape every command on this page shares:
 
@@ -11,8 +14,11 @@ The shape every command on this page shares:
   Progress and errors go to stderr. An agent never has to strip prose.
 - Exit code is the verdict. `0` the thing passed, `1` the thing failed and the
   JSON says why, `2` gdkit itself could not do the job (wrong engine path,
-  missing config, hung process). An agent branches on this before reading JSON.
-- Every path in output is `res://`, every location is `resource` + `line`, and
+  invalid config, startup/probe failure). Check-phase timeouts produce an
+    `incomplete` report and exit `1`; a probe timeout is a tool error, exit `2`.
+    An agent branches on this before reading JSON.
+- Diagnostic resource paths are `res://` (artifact paths are filesystem paths),
+  locations use `resource` + `line` when available, and
   every report carries `schema_version`. An agent can grep, sort, and diff.
 - Every engine call has a deadline. A hung autoload produces a timeout in the
   report, never a hung agent.
@@ -36,14 +42,19 @@ script and knows nothing about scenes, resources, missing preloads, or a
 cross-reference checks with no engine: a scene connection to a method the script
 no longer declares, `$Player/Camera3D` when no owning scene has that node, a
 `preload` or `ExtResource` path that points at nothing, a `uid://` nothing
-resolves. Then it imports a disposable copy of the project and loads every
-script, scene, and resource in a fresh process, so it finds what the editor
-would find, and it never touches the source project's `.godot`.
+resolves. Then it imports a clean disposable copy of the project, scans scripts
+in the editor, audits the generated class cache, and loads eligible entries from
+a full-file inventory in a fresh runtime process. Eligibility uses the union of
+editor and runtime loader registries, including imported assets and custom runtime
+loaders, rather than a fixed extension list. Copies include source assets but
+exclude `.godot` and `.git`; no source cache is seeded. Authored files and source
+import caches are untouched; probe metadata and reports live under `.godot/gdkit`.
 
 `--static-only` is the sub-second version for the inner loop. `--baseline`
 diffs against a previous report by diagnostic identity (message and resource,
-not line), so on a project with pre-existing warnings the agent reads
-`baseline.new` and ignores the rest.
+not line). Carried static findings permit engine validation but retain their
+failures and final failed verdict; new static findings block engine phases.
+`baseline.new` helps prioritize changes, not waive existing failures.
 
 What the agent reads from the report:
 
@@ -68,6 +79,8 @@ a real diagnostic there, and the agent knows to widen the slice rather than
 `incomplete` is distinct from `failed` on purpose. It means the engine did not
 report completion (crash, timeout, malformed output). The agent should not treat
 it as "my change is wrong"; it should read `failures[].kind` and probably rerun.
+Both `failed` and `incomplete` exit `1`; startup, probe, and configuration errors
+exit `2` without a check report.
 
 ## 2. `api`: stop guessing names
 
@@ -160,9 +173,20 @@ and tell me if it printed `ERROR:` or exited nonzero." No test framework, no
 scene tree setup, no addon. An agent writes these as throwaway checks while
 working, the way it would write a `println!` test, and deletes them after.
 
+The bootstrap emits `GDKIT_SCRIPT_STARTED` before handing off to the script,
+not a success envelope. The script must call `quit` before its deadline; success
+requires the marker, a clean exit, and no error diagnostics. A marker followed by
+a hang is a timeout, not a pass.
+
 The report's `phases[]` entry for the script carries `outcome`
-(`completed | failed | timed_out`), the diagnostics it printed, and the raw log
-path. Runtime phases are skipped, and say so, when validation already failed.
+(`completed | failed | timed_out | skipped`), diagnostics, and raw-stream artifact
+paths. Failed engine phases skip later phases with a reason. New static findings
+block engine phases; baseline-carried static findings allow them but still fail
+the final report.
+
+Runtime behavior is verified on Linux. macOS shares the POSIX implementation but
+is not runtime-verified here. Windows Job objects are out of scope: direct-child
+cleanup exists, but process-tree cleanup is not guaranteed.
 
 ## 6. `net`: the multiplayer map
 
