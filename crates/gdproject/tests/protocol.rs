@@ -140,8 +140,8 @@ fn error_envelopes_surface_stage_and_message() {
 
 #[test]
 fn documented_variant_json_shapes_survive_envelope_transport() {
-    // Contract examples, NOT engine-produced goldens: protocol.gd and the
-    // gdview Variant decoder are scaffolds. This tests transport, not encoding.
+    // Handwritten contract examples, separate from the engine golden below.
+    // This tests transport, not Variant encoding or decoding.
     let payload = json!([
         null, true, false, 42, -42, 1.25, "hello", [], {},
         {"nested": [1, {"value": "text"}]},
@@ -164,6 +164,55 @@ fn documented_variant_json_shapes_survive_envelope_transport() {
         json!({"protocol": 1, "harness": "resource_schema", "ok": true, "payload": payload}),
     );
     assert_eq!(parse::<Value>(&[&line]).unwrap().payload, Some(payload));
+}
+
+#[test]
+fn engine_golden_variant_payload_survives_envelope_transport() {
+    // Frozen engine output copied from
+    // spike-real-engine-check-contracts/protocol_golden.json. The local copy
+    // keeps this offline test independent of the spike and a Godot executable.
+    // These are JSON transport assertions, not gdview Variant decoding tests.
+    let fixture = include_str!("fixtures/protocol_golden.json");
+    let golden: Value = serde_json::from_str(fixture).unwrap();
+    // Remove pretty-print line whitespace without reserializing the JSON values;
+    // the harness wire format is a single prefixed line.
+    let compact: String = fixture.lines().map(str::trim).collect();
+    let line = format!("{RESULT_PREFIX}{compact}");
+    assert_eq!(line.lines().count(), 1);
+    let envelope =
+        parse::<Value>(&["engine startup noise", &line, "engine shutdown noise"]).unwrap();
+
+    assert_eq!(envelope.protocol, PROTOCOL_VERSION);
+    assert_eq!(envelope.harness, "variant_contracts");
+    assert!(envelope.ok);
+    assert_eq!(envelope.error, None);
+    let payload = envelope.payload.as_ref().unwrap();
+    assert_eq!(payload["cases"], 47);
+    let encoded = payload["encoded"].as_array().unwrap();
+    assert_eq!(encoded.len(), 47);
+    assert_eq!(payload, &golden["payload"]);
+    assert_eq!(serde_json::to_value(&envelope).unwrap(), golden);
+
+    // Pin precision-sensitive and nested representations from the engine output.
+    for decimal in [
+        "9007199254740993",
+        "-9223372036854775808",
+        "9223372036854775807",
+    ] {
+        assert!(encoded.contains(&json!({"$variant": {"type": "int", "value": decimal}})));
+    }
+    for special in ["nan", "inf", "-inf"] {
+        assert!(encoded.contains(&json!({"$variant": {"type": "float", "value": special}})));
+    }
+    assert!(encoded.contains(&json!("line\nquote\"")));
+    assert!(encoded.contains(&json!({"$variant": {
+        "type": "Dictionary", "value": [["$ref", "literal"]]
+    }})));
+    assert!(encoded.contains(&json!({"$ref": "res://probe.tres"})));
+    assert!(encoded.contains(&json!({"$resource": {
+        "script": "res://scripted_resource.gd",
+        "properties": {"resource_local_to_scene": false, "resource_name": "", "answer": 42}
+    }})));
 }
 
 #[test]

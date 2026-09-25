@@ -12,8 +12,12 @@
 //! - `error_envelopes_surface_stage_and_message`
 //! - `documented_variant_json_shapes_survive_envelope_transport`
 //!
-//! Real-engine encoder compatibility additionally requires an implemented
-//! `harness/protocol.gd` and `gdview::variant` decoder and engine-produced fixtures.
+//! - `engine_golden_variant_payload_survives_envelope_transport`
+//!
+//! The frozen engine-produced `tests/fixtures/protocol_golden.json` covers
+//! envelope decoding and lossless JSON payload transport offline. It does not
+//! exercise the current engine encoder or claim `gdview::variant` decoding
+//! compatibility.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};

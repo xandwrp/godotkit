@@ -1,0 +1,477 @@
+{
+  "protocol": 1,
+  "harness": "variant_contracts",
+  "ok": true,
+  "payload": {
+    "cases": 47,
+    "encoded": [
+      null,
+      true,
+      42,
+      {
+        "$variant": {
+          "type": "int",
+          "value": "9007199254740993"
+        }
+      },
+      {
+        "$variant": {
+          "type": "int",
+          "value": "-9223372036854775808"
+        }
+      },
+      {
+        "$variant": {
+          "type": "int",
+          "value": "9223372036854775807"
+        }
+      },
+      1.25,
+      {
+        "$variant": {
+          "type": "float",
+          "value": "nan"
+        }
+      },
+      {
+        "$variant": {
+          "type": "float",
+          "value": "inf"
+        }
+      },
+      {
+        "$variant": {
+          "type": "float",
+          "value": "-inf"
+        }
+      },
+      "line\nquote\"",
+      {
+        "$variant": {
+          "type": "StringName",
+          "value": "name"
+        }
+      },
+      {
+        "$variant": {
+          "type": "NodePath",
+          "value": "child:property"
+        }
+      },
+      {
+        "$variant": {
+          "type": "Vector2",
+          "value": [
+            1.0,
+            2.0
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Vector2i",
+          "value": [
+            -1,
+            2
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Vector3",
+          "value": [
+            1.0,
+            2.0,
+            3.0
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Vector3i",
+          "value": [
+            1,
+            2,
+            3
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Vector4",
+          "value": [
+            1.0,
+            2.0,
+            3.0,
+            4.0
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Vector4i",
+          "value": [
+            1,
+            2,
+            3,
+            4
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Color",
+          "value": [
+            0.25,
+            0.5,
+            0.75,
+            1.0
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Rect2",
+          "value": [
+            1.0,
+            2.0,
+            3.0,
+            4.0
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Rect2i",
+          "value": [
+            1,
+            2,
+            3,
+            4
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Plane",
+          "value": [
+            0.0,
+            1.0,
+            0.0,
+            2.0
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Quaternion",
+          "value": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "AABB",
+          "value": [
+            1.0,
+            2.0,
+            3.0,
+            4.0,
+            5.0,
+            6.0
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Basis",
+          "value": [
+            1.0,
+            2.0,
+            3.0,
+            4.0,
+            5.0,
+            6.0,
+            7.0,
+            8.0,
+            9.0
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Transform2D",
+          "value": [
+            1.0,
+            2.0,
+            3.0,
+            4.0,
+            5.0,
+            6.0
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Transform3D",
+          "value": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            4.0,
+            5.0,
+            6.0
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Projection",
+          "value": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        }
+      },
+      [
+        1,
+        "two"
+      ],
+      {
+        "$variant": {
+          "type": "Array",
+          "element": "Vector2",
+          "value": [
+            {
+              "$variant": {
+                "type": "Vector2",
+                "value": [
+                  1.0,
+                  2.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "key": [
+          3
+        ]
+      },
+      {
+        "$variant": {
+          "type": "Dictionary",
+          "value": [
+            [
+              {
+                "$variant": {
+                  "type": "Vector2i",
+                  "value": [
+                    1,
+                    2
+                  ]
+                }
+              },
+              {
+                "$variant": {
+                  "type": "StringName",
+                  "value": "value"
+                }
+              }
+            ]
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "Dictionary",
+          "value": [
+            [
+              "$ref",
+              "literal"
+            ]
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "PackedByteArray",
+          "value": [
+            0,
+            255
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "PackedInt32Array",
+          "value": [
+            -1,
+            2147483647
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "PackedInt64Array",
+          "value": [
+            {
+              "$variant": {
+                "type": "int",
+                "value": "-9223372036854775808"
+              }
+            },
+            {
+              "$variant": {
+                "type": "int",
+                "value": "9223372036854775807"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "PackedFloat32Array",
+          "value": [
+            0.25
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "PackedFloat64Array",
+          "value": [
+            1.25
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "PackedStringArray",
+          "value": [
+            "a",
+            "b"
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "PackedVector2Array",
+          "value": [
+            {
+              "$variant": {
+                "type": "Vector2",
+                "value": [
+                  1.0,
+                  1.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "PackedVector3Array",
+          "value": [
+            {
+              "$variant": {
+                "type": "Vector3",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "PackedVector4Array",
+          "value": [
+            {
+              "$variant": {
+                "type": "Vector4",
+                "value": [
+                  1.0,
+                  1.0,
+                  1.0,
+                  1.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "$variant": {
+          "type": "PackedColorArray",
+          "value": [
+            {
+              "$variant": {
+                "type": "Color",
+                "value": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  1.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "$resource": {
+          "properties": {
+            "resource_local_to_scene": false,
+            "resource_name": "inline"
+          },
+          "class": "Resource"
+        }
+      },
+      {
+        "$ref": "res://probe.tres"
+      },
+      {
+        "$resource": {
+          "properties": {
+            "resource_local_to_scene": false,
+            "resource_name": "",
+            "answer": 42
+          },
+          "script": "res://scripted_resource.gd"
+        }
+      }
+    ]
+  },
+  "error": null
+}
