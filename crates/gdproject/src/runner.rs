@@ -1,5 +1,6 @@
 //! One engine invocation. Every operation module builds an [`Invocation`] and
-//! calls [`run_harness`] or [`run_engine`]; nothing else spawns Godot.
+//! calls a capture API, [`run_harness`], [`run_engine`], or [`spawn_game`].
+//! ScriptBootstrap uses raw capture: startup is not a completion envelope.
 //!
 //! # Tests (tests/runner.rs, offline with `fake-godot`)
 //! - `run_harness_writes_harness_and_protocol_to_a_temp_dir_and_passes_user_args_after_double_dash`
@@ -22,8 +23,9 @@ use crate::engine::Engine;
 use crate::process::Captured;
 use crate::protocol::Envelope;
 
-/// Embedded GDScript harnesses. Each one `extends SceneTree` and emits a single
-/// protocol envelope. `protocol.gd` is always written next to the harness.
+/// Embedded SceneTree harnesses. `protocol.gd` is always written alongside them.
+/// ScriptBootstrap emits a startup marker, not a success envelope; RuntimeProbe
+/// serves the live game protocol instead of a completion envelope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Harness {
     Probe,
@@ -68,7 +70,24 @@ pub const PROTOCOL_SOURCE: &str = include_str!("harness/protocol.gd");
 
 /// Hash of every embedded harness; part of the engine probe key.
 pub fn harness_hash() -> u64 {
-    todo!()
+    let mut hash = blake3::Hasher::new();
+    hash.update(PROTOCOL_SOURCE.as_bytes());
+    for harness in [
+        Harness::Probe,
+        Harness::Check,
+        Harness::ImportScan,
+        Harness::ResourceSchema,
+        Harness::ResourceCreate,
+        Harness::RuntimeProbe,
+        Harness::ScriptBootstrap,
+    ] {
+        hash.update(harness.name().as_bytes());
+        hash.update(&(harness.source().len() as u64).to_le_bytes());
+        hash.update(harness.source().as_bytes());
+    }
+    let mut bytes = [0; 8];
+    bytes.copy_from_slice(&hash.finalize().as_bytes()[..8]);
+    u64::from_le_bytes(bytes)
 }
 
 pub struct Invocation<'a> {
@@ -85,7 +104,14 @@ pub struct Invocation<'a> {
 
 impl<'a> Invocation<'a> {
     pub fn new(engine: &'a Engine, project_dir: &'a Path, deadline: Duration) -> Self {
-        Self { engine, project_dir, deadline, engine_args: Vec::new(), user_args: Vec::new(), env: Vec::new() }
+        Self {
+            engine,
+            project_dir,
+            deadline,
+            engine_args: Vec::new(),
+            user_args: Vec::new(),
+            env: Vec::new(),
+        }
     }
 }
 
@@ -97,18 +123,195 @@ pub struct HarnessRun<T> {
 
 /// `<engine> --headless --no-header [--editor] --path <dir> --script <tmp>/<harness>.gd -- <user_args…>`
 /// Decodes the envelope; an `ok: false` envelope becomes `Error::Harness`.
-pub fn run_harness<T: DeserializeOwned>(invocation: &Invocation<'_>, harness: Harness) -> crate::Result<HarnessRun<T>> {
-    todo!()
+pub fn run_harness<T: DeserializeOwned>(
+    invocation: &Invocation<'_>,
+    harness: Harness,
+) -> crate::Result<HarnessRun<T>> {
+    let run = run_harness_captured(invocation, harness)?;
+    Ok(HarnessRun {
+        envelope: run.envelope?,
+        captured: run.captured,
+        diagnostics: run.diagnostics,
+    })
+}
+
+/// Capture survives output limits, timeout, unsuccessful exit, and every envelope error.
+/// Outer errors mean scratch setup or process I/O failed and no complete capture
+/// was returned by the process layer. Diagnostics never determine this result.
+#[derive(Debug)]
+pub struct CapturedHarnessRun<T> {
+    pub captured: Captured,
+    pub diagnostics: Vec<Diagnostic>,
+    pub envelope: crate::Result<Envelope<T>>,
+}
+
+/// Typed completion-harness path. Output limits and timeout are checked before
+/// decoding; a successful envelope still requires normal exit zero. Use the raw API for
+/// ScriptBootstrap and interpret its exact stdout marker and exit independently.
+pub fn run_harness_captured<T: DeserializeOwned>(
+    invocation: &Invocation<'_>,
+    harness: Harness,
+) -> crate::Result<CapturedHarnessRun<T>> {
+    let (captured, diagnostics) = run_harness_raw(invocation, harness)?;
+    let envelope = decode_completion(invocation, harness, &captured);
+    Ok(CapturedHarnessRun {
+        captured,
+        diagnostics,
+        envelope,
+    })
+}
+
+/// Runs an embedded harness without interpreting protocol, exit, or timeout.
+/// In particular, ScriptBootstrap success requires exactly one stdout line
+/// `GDKIT_SCRIPT_STARTED`, normal exit zero, no timeout, no error envelope and no
+/// engine errors on either stream. Output-limit truncation also prevents success.
+/// The caller owns that specialized verdict.
+pub fn run_harness_raw(
+    invocation: &Invocation<'_>,
+    harness: Harness,
+) -> crate::Result<(Captured, Vec<Diagnostic>)> {
+    let files = harness_files(harness)?;
+    let mut spawn = engine_spawn(invocation, true);
+    if harness.needs_editor() && !spawn.args.iter().any(|arg| arg == "--editor") {
+        spawn.args.push("--editor".into());
+    }
+    spawn.args.extend([
+        OsString::from("--script"),
+        files
+            .path
+            .join(format!("{}.gd", harness.name()))
+            .into_os_string(),
+    ]);
+    append_user_args(&mut spawn, invocation);
+    capture(&spawn, invocation.deadline)
+}
+
+fn decode_completion<T: DeserializeOwned>(
+    invocation: &Invocation<'_>,
+    harness: Harness,
+    captured: &Captured,
+) -> crate::Result<Envelope<T>> {
+    if captured.output_limit_exceeded {
+        return Err(crate::Error::Invalid(format!(
+            "harness {} exceeded the output capture limit; output is incomplete",
+            harness.name(),
+        )));
+    }
+    if captured.timed_out {
+        return Err(crate::Error::Timeout {
+            what: harness.name().into(),
+            deadline: invocation.deadline,
+        });
+    }
+    let protocol_error = |source| crate::Error::Protocol {
+        harness: harness.name(),
+        source,
+    };
+    if matches!(harness, Harness::ScriptBootstrap | Harness::RuntimeProbe) {
+        return Err(protocol_error(crate::protocol::ProtocolError::Malformed(
+            "this harness requires raw capture, not a completion envelope".into(),
+        )));
+    }
+    let stdout = captured.stdout();
+    let envelope = crate::protocol::parse_envelope::<T>(
+        String::from_utf8_lossy(&stdout).lines().map(str::to_owned),
+    )
+    .map_err(protocol_error)?;
+    if envelope.harness != harness.name() {
+        return Err(protocol_error(crate::protocol::ProtocolError::Malformed(
+            format!(
+                "expected harness {}, received {}",
+                harness.name(),
+                envelope.harness,
+            ),
+        )));
+    }
+    if !envelope.ok || envelope.error.is_some() {
+        let error = envelope.error.unwrap_or(crate::protocol::HarnessError {
+            stage: "unknown".into(),
+            message: "harness reported failure without error details".into(),
+            field: None,
+        });
+        return Err(crate::Error::Harness {
+            harness: harness.name(),
+            stage: error.stage,
+            message: error.message,
+        });
+    }
+    if !captured.success() {
+        return Err(crate::Error::Harness {
+            harness: harness.name(),
+            stage: "exit".into(),
+            message: format!("engine did not exit successfully: {:?}", captured.status),
+        });
+    }
+    Ok(envelope)
+}
+
+fn harness_files(harness: Harness) -> crate::Result<crate::workspace::IsolatedCopy> {
+    let files = crate::workspace::IsolatedCopy::empty()?;
+    for (name, source) in [
+        (format!("{}.gd", harness.name()), harness.source()),
+        ("protocol.gd".into(), PROTOCOL_SOURCE),
+    ] {
+        let path = files.path.join(name);
+        std::fs::write(&path, source).map_err(|source| crate::Error::Io { path, source })?;
+    }
+    Ok(files)
+}
+
+fn engine_spawn(invocation: &Invocation<'_>, headless: bool) -> crate::process::Spawn {
+    let mut spawn = crate::process::Spawn::new(&invocation.engine.executable);
+    if headless && !invocation.engine_args.iter().any(|arg| arg == "--headless") {
+        spawn.args.push("--headless".into());
+    }
+    spawn.args.extend([
+        OsString::from("--no-header"),
+        OsString::from("--path"),
+        invocation.project_dir.as_os_str().to_owned(),
+    ]);
+    spawn.args.extend(invocation.engine_args.iter().cloned());
+    spawn.env.clone_from(&invocation.env);
+    spawn
+}
+
+fn append_user_args(spawn: &mut crate::process::Spawn, invocation: &Invocation<'_>) {
+    spawn.args.push("--".into());
+    spawn.args.extend(invocation.user_args.iter().cloned());
+}
+
+fn capture(
+    spawn: &crate::process::Spawn,
+    deadline: Duration,
+) -> crate::Result<(Captured, Vec<Diagnostic>)> {
+    let captured = crate::process::run(spawn, deadline).map_err(crate::Error::Spawn)?;
+    let diagnostics = crate::diagnostics::parse(&captured, 0);
+    Ok((captured, diagnostics))
 }
 
 /// Raw engine run with no harness: `--editor --import`, the extension-api dump, etc.
 /// The caller interprets exit status and diagnostics.
 pub fn run_engine(invocation: &Invocation<'_>) -> crate::Result<(Captured, Vec<Diagnostic>)> {
-    todo!()
+    let mut spawn = engine_spawn(invocation, true);
+    append_user_args(&mut spawn, invocation);
+    capture(&spawn, invocation.deadline)
 }
 
 /// Spawns the engine as the game for [`crate::run`]: `--path <project> [--headless] --script runtime_probe.gd [scene] -- <args>`.
-/// Returns the guard and the temp dir holding the harness (dropped with the guard).
-pub fn spawn_game(invocation: &Invocation<'_>, log: &Path) -> crate::Result<crate::process::ChildGuard> {
-    todo!()
+/// Headless mode is opt-in via `engine_args`; the caller enforces the deadline.
+/// The guard retains the embedded files until drop, after process cleanup.
+pub fn spawn_game(
+    invocation: &Invocation<'_>,
+    log: &Path,
+) -> crate::Result<crate::process::ChildGuard> {
+    let files = harness_files(Harness::RuntimeProbe)?;
+    let mut spawn = engine_spawn(invocation, false);
+    spawn.args.extend([
+        OsString::from("--script"),
+        files.path.join("runtime_probe.gd").into_os_string(),
+    ]);
+    append_user_args(&mut spawn, invocation);
+    let mut guard = crate::process::spawn(&spawn, log).map_err(crate::Error::Spawn)?;
+    guard.retain(files);
+    Ok(guard)
 }
