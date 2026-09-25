@@ -23,6 +23,10 @@ pub struct RefreshReport {
 }
 
 /// `--editor --import` on the real project.
-pub fn refresh(workspace: &Workspace, engine: &Engine, deadline: Duration) -> crate::Result<RefreshReport> {
+pub fn refresh(
+    workspace: &Workspace,
+    engine: &Engine,
+    deadline: Duration,
+) -> crate::Result<RefreshReport> {
     todo!()
 }

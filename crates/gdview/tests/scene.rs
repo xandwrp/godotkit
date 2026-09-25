@@ -41,23 +41,42 @@ fn parses_header_ext_sub_nodes_connections_and_editable_paths() {
     assert_eq!(scene.uid.as_ref().unwrap().0, "uid://b1player");
     assert_eq!(scene.ext_resources.len(), 2);
     let script = scene.ext_resource("1_abc").unwrap();
-    assert_eq!((script.type_name.as_str(), script.path.as_str()), ("Script", "res://player.gd"));
+    assert_eq!(
+        (script.type_name.as_str(), script.path.as_str()),
+        ("Script", "res://player.gd")
+    );
     assert_eq!(script.uid.as_ref().unwrap().0, "uid://c2script");
     assert!(scene.ext_resource("2_gun").unwrap().uid.is_none());
-    assert_eq!(scene.sub_resource("Shape_1").unwrap().type_name, "RectangleShape2D");
+    assert_eq!(
+        scene.sub_resource("Shape_1").unwrap().type_name,
+        "RectangleShape2D"
+    );
     let names: Vec<_> = scene.nodes.iter().map(|n| n.name.as_str()).collect();
     assert_eq!(names, ["Player", "Shape", "Gun", "Muzzle", "Later"]);
     assert_eq!(scene.connections.len(), 2);
     let fired = &scene.connections[0];
-    assert_eq!((fired.signal.as_str(), fired.from.0.as_str(), fired.to.0.as_str(), fired.method.as_str()), ("fired", "Gun", ".", "_on_gun_fired"));
+    assert_eq!(
+        (
+            fired.signal.as_str(),
+            fired.from.0.as_str(),
+            fired.to.0.as_str(),
+            fired.method.as_str()
+        ),
+        ("fired", "Gun", ".", "_on_gun_fired")
+    );
     assert_eq!((fired.flags, fired.unbinds), (Some(3), 1));
     assert_eq!(fired.binds, [Value::Int(1), Value::Str("x".into())]);
-    assert_eq!((scene.connections[1].flags, scene.connections[1].unbinds), (None, 0));
+    assert_eq!(
+        (scene.connections[1].flags, scene.connections[1].unbinds),
+        (None, 0)
+    );
     assert_eq!(scene.editable_instances, [NodePath("Gun".into())]);
     assert!(scene.resource.is_none());
     let root = scene.root().unwrap();
     assert_eq!(root.script, Some(ResourceRef::Ext("1_abc".into())));
-    assert!(matches!(scene.resolve(root.script.as_ref().unwrap()), Some(Resolved::Ext(r)) if r.id == "1_abc"));
+    assert!(
+        matches!(scene.resolve(root.script.as_ref().unwrap()), Some(Resolved::Ext(r)) if r.id == "1_abc")
+    );
     assert!(scene.resolve(&ResourceRef::Sub("missing".into())).is_none());
 }
 
@@ -87,26 +106,54 @@ metadata/_edit_lock_ = true
 "#;
     let scene = parse(source).unwrap();
     let props = &scene.root().unwrap().properties;
-    let call = |name: &str, args: Vec<Value>| Value::Call { name: name.into(), args };
+    let call = |name: &str, args: Vec<Value>| Value::Call {
+        name: name.into(),
+        args,
+    };
     assert_eq!(props["i"], Value::Int(-3));
     assert_eq!(props["f"], Value::Float(1.5));
     assert_eq!(props["e"], Value::Float(1e-05));
     assert_eq!(props["s"], Value::Str("a\nb\\cé".into()));
     assert_eq!(props["b"], Value::Bool(false));
     assert_eq!(props["n"], Value::Null);
-    assert_eq!(props["a"], Value::Array(vec![Value::Int(1), Value::Float(2.0), Value::Str("three".into())]));
+    assert_eq!(
+        props["a"],
+        Value::Array(vec![
+            Value::Int(1),
+            Value::Float(2.0),
+            Value::Str("three".into())
+        ])
+    );
     assert_eq!(
         props["d"],
         Value::Dict(vec![
-            (Value::Str("k".into()), call("Vector2", vec![Value::Int(1), Value::Int(2)])),
+            (
+                Value::Str("k".into()),
+                call("Vector2", vec![Value::Int(1), Value::Int(2)])
+            ),
             (Value::Int(3), Value::Array(vec![Value::Bool(true)])),
         ])
     );
-    assert_eq!(props["v"], call("Vector2", vec![Value::Int(1), Value::Int(-2)]));
+    assert_eq!(
+        props["v"],
+        call("Vector2", vec![Value::Int(1), Value::Int(-2)])
+    );
     assert_eq!(props["p"], call("NodePath", vec![Value::Str("A/B".into())]));
-    assert_eq!(props["ext"].as_resource_ref(), Some(ResourceRef::Ext("1_x".into())));
-    assert_eq!(props["sub"].as_resource_ref(), Some(ResourceRef::Sub("S_1".into())));
-    assert_eq!(props["packed"], call("PackedStringArray", vec![Value::Str("a".into()), Value::Str("b".into())]));
+    assert_eq!(
+        props["ext"].as_resource_ref(),
+        Some(ResourceRef::Ext("1_x".into()))
+    );
+    assert_eq!(
+        props["sub"].as_resource_ref(),
+        Some(ResourceRef::Sub("S_1".into()))
+    );
+    assert_eq!(
+        props["packed"],
+        call(
+            "PackedStringArray",
+            vec![Value::Str("a".into()), Value::Str("b".into())]
+        )
+    );
     assert_eq!(props["sn"], Value::StringName("name".into()));
     assert_eq!(props["sn"].as_str(), Some("name"));
     assert_eq!(props["metadata/_edit_lock_"], Value::Bool(true));
@@ -115,10 +162,23 @@ metadata/_edit_lock_ = true
 #[test]
 fn every_entry_carries_its_line_number() {
     let scene = parse(SCENE).unwrap();
-    assert_eq!(scene.ext_resources.iter().map(|r| r.line).collect::<Vec<_>>(), [3, 4]);
+    assert_eq!(
+        scene
+            .ext_resources
+            .iter()
+            .map(|r| r.line)
+            .collect::<Vec<_>>(),
+        [3, 4]
+    );
     assert_eq!(scene.sub_resources[0].line, 6);
-    assert_eq!(scene.nodes.iter().map(|n| n.line).collect::<Vec<_>>(), [9, 15, 18, 20, 23]);
-    assert_eq!(scene.connections.iter().map(|c| c.line).collect::<Vec<_>>(), [25, 26]);
+    assert_eq!(
+        scene.nodes.iter().map(|n| n.line).collect::<Vec<_>>(),
+        [9, 15, 18, 20, 23]
+    );
+    assert_eq!(
+        scene.connections.iter().map(|c| c.line).collect::<Vec<_>>(),
+        [25, 26]
+    );
 }
 
 #[test]
@@ -129,17 +189,28 @@ fn instance_and_instance_placeholder_are_distinguished() {
     assert!(gun.instance_placeholder.is_none());
     let later = scene.node(&NodePath("Later".into())).unwrap();
     assert!(later.instance.is_none());
-    assert_eq!(later.instance_placeholder.as_ref().unwrap().as_str(), "res://later.tscn");
+    assert_eq!(
+        later.instance_placeholder.as_ref().unwrap().as_str(),
+        "res://later.tscn"
+    );
     assert!(scene.inherited_base().is_none());
     let inherited = parse("[gd_scene format=3]\n[ext_resource type=\"PackedScene\" path=\"res://base.tscn\" id=\"1\"]\n[node name=\"Base\" instance=ExtResource(\"1\")]\n[node name=\"Extra\" type=\"Node\" parent=\".\"]\n").unwrap();
-    assert_eq!(inherited.inherited_base().unwrap().path.as_str(), "res://base.tscn");
+    assert_eq!(
+        inherited.inherited_base().unwrap().path.as_str(),
+        "res://base.tscn"
+    );
 }
 
 #[test]
 fn groups_and_unique_names_are_read() {
     let scene = parse(SCENE).unwrap();
     assert_eq!(scene.root().unwrap().groups, ["players", "actors"]);
-    assert!(scene.node(&NodePath("Gun/Muzzle".into())).unwrap().unique_name_in_owner);
+    assert!(
+        scene
+            .node(&NodePath("Gun/Muzzle".into()))
+            .unwrap()
+            .unique_name_in_owner
+    );
     assert!(!scene.root().unwrap().unique_name_in_owner);
 }
 
@@ -153,7 +224,10 @@ fn parent_of_root_is_none_and_paths_resolve_from_root_name() {
     assert_eq!(paths, [".", "Shape", "Gun", "Gun/Muzzle", "Later"]);
     assert_eq!(scene.node(&NodePath(".".into())).unwrap().name, "Player");
     assert_eq!(scene.node(&NodePath("./Gun".into())).unwrap().name, "Gun");
-    let children: Vec<_> = scene.children_of(&NodePath(".".into())).map(|n| n.name.as_str()).collect();
+    let children: Vec<_> = scene
+        .children_of(&NodePath(".".into()))
+        .map(|n| n.name.as_str())
+        .collect();
     assert_eq!(children, ["Shape", "Gun", "Later"]);
     assert_eq!(scene.children_of(&NodePath("Gun".into())).count(), 1);
 }
@@ -164,11 +238,30 @@ fn malformed_sections_error_with_line_number() {
         Err(gdview::Error::Parse { line, .. }) => line,
         other => panic!("expected a parse error, got {other:?}"),
     };
-    assert_eq!(line_of("[gd_scene format=3]\n\n[node name=\"A\" type=\"Node\"\n"), 3);
-    assert_eq!(line_of("[gd_scene format=3]\n[node name=\"A\" type=\"Node\"]\n[node name=\"B\" type=\"Node\"]\n"), 3);
-    assert_eq!(line_of("[gd_scene format=3]\n[node name=\"A\" type=\"Node\"]\nx = Vector2(1,\n"), 4);
-    assert_eq!(line_of("[gd_scene format=3]\n[ext_resource type=\"Script\" path=\"scripts\\\\a.gd\" id=\"1\"]\n"), 2);
-    assert_eq!(line_of("[gd_scene format=3]\n[node name=\"A\" type=\"Node\"]\nkey = \"unterminated\n"), 3);
+    assert_eq!(
+        line_of("[gd_scene format=3]\n\n[node name=\"A\" type=\"Node\"\n"),
+        3
+    );
+    assert_eq!(
+        line_of(
+            "[gd_scene format=3]\n[node name=\"A\" type=\"Node\"]\n[node name=\"B\" type=\"Node\"]\n"
+        ),
+        3
+    );
+    assert_eq!(
+        line_of("[gd_scene format=3]\n[node name=\"A\" type=\"Node\"]\nx = Vector2(1,\n"),
+        4
+    );
+    assert_eq!(
+        line_of(
+            "[gd_scene format=3]\n[ext_resource type=\"Script\" path=\"scripts\\\\a.gd\" id=\"1\"]\n"
+        ),
+        2
+    );
+    assert_eq!(
+        line_of("[gd_scene format=3]\n[node name=\"A\" type=\"Node\"]\nkey = \"unterminated\n"),
+        3
+    );
     assert!(parse("").is_err());
     assert!(parse("[node name=\"A\"]\n").is_err());
 }
@@ -195,6 +288,9 @@ damage = 12
     assert_eq!(resource.ext_resources.len(), 2);
     let props = resource.resource.as_ref().unwrap();
     assert_eq!(props["damage"], Value::Int(12));
-    assert_eq!(props["script"].as_resource_ref(), Some(ResourceRef::Ext("1".into())));
+    assert_eq!(
+        props["script"].as_resource_ref(),
+        Some(ResourceRef::Ext("1".into()))
+    );
     assert_eq!(resource.sub_resources[0].properties.len(), 1);
 }

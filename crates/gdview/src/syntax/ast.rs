@@ -191,7 +191,9 @@ impl<'a> VarDecl<'a> {
         self.0.has_token(SyntaxKind::StaticKw)
     }
     pub fn type_text(&self) -> Option<&'a str> {
-        self.0.child(SyntaxKind::TypeRef).map(|node| node.trimmed_text())
+        self.0
+            .child(SyntaxKind::TypeRef)
+            .map(|node| node.trimmed_text())
     }
     pub fn initializer(&self) -> Option<Node<'a>> {
         node_after_assignment(self.0)
@@ -200,7 +202,9 @@ impl<'a> VarDecl<'a> {
 
 impl<'a> ConstDecl<'a> {
     pub fn type_text(&self) -> Option<&'a str> {
-        self.0.child(SyntaxKind::TypeRef).map(|node| node.trimmed_text())
+        self.0
+            .child(SyntaxKind::TypeRef)
+            .map(|node| node.trimmed_text())
     }
     pub fn initializer(&self) -> Option<Node<'a>> {
         node_after_assignment(self.0)
@@ -221,7 +225,9 @@ impl<'a> FuncDecl<'a> {
         parameters_of(self.0)
     }
     pub fn return_type_text(&self) -> Option<&'a str> {
-        self.0.child(SyntaxKind::TypeRef).map(|node| node.trimmed_text())
+        self.0
+            .child(SyntaxKind::TypeRef)
+            .map(|node| node.trimmed_text())
     }
     pub fn body(&self) -> Option<Node<'a>> {
         self.0.child(SyntaxKind::Block)
@@ -248,14 +254,19 @@ impl<'a> Annotation<'a> {
     /// Argument source texts, e.g. `["any_peer", "call_local"]`. String
     /// arguments keep their quotes.
     pub fn arguments(&self) -> Vec<&'a str> {
-        argument_nodes(self.0).map(|node| node.trimmed_text()).collect()
+        argument_nodes(self.0)
+            .map(|node| node.trimmed_text())
+            .collect()
     }
 }
 
 impl<'a> CallExpr<'a> {
     /// Callee source text, e.g. `self.rpc`, `multiplayer.get_unique_id`, `rpc_id`.
     pub fn callee_text(&self) -> &'a str {
-        self.0.children().next().map_or("", |node| node.trimmed_text())
+        self.0
+            .children()
+            .next()
+            .map_or("", |node| node.trimmed_text())
     }
     pub fn arguments(&self) -> Vec<Node<'a>> {
         argument_nodes(self.0).collect()
@@ -274,8 +285,11 @@ pub struct GetNode<'a>(pub Node<'a>);
 
 impl<'a> GetNode<'a> {
     pub fn cast(node: Node<'a>) -> Option<Self> {
-        matches!(node.kind(), SyntaxKind::GetNodeExpr | SyntaxKind::UniqueNodeExpr)
-            .then_some(Self(node))
+        matches!(
+            node.kind(),
+            SyntaxKind::GetNodeExpr | SyntaxKind::UniqueNodeExpr
+        )
+        .then_some(Self(node))
     }
     pub fn node(&self) -> Node<'a> {
         self.0
@@ -285,14 +299,19 @@ impl<'a> GetNode<'a> {
     pub fn path(&self) -> String {
         let mut path = String::new();
         let mut tokens = self.0.own_tokens().peekable();
-        if tokens.peek().is_some_and(|token| token.kind() == SyntaxKind::Dollar) {
+        if tokens
+            .peek()
+            .is_some_and(|token| token.kind() == SyntaxKind::Dollar)
+        {
             tokens.next();
         }
         for token in tokens {
             match token.kind() {
                 SyntaxKind::Slash => path.push('/'),
                 SyntaxKind::Percent => path.push('%'),
-                SyntaxKind::String => path.push_str(&string_value(token.text()).unwrap_or_default()),
+                SyntaxKind::String => {
+                    path.push_str(&string_value(token.text()).unwrap_or_default())
+                }
                 _ => path.push_str(token.text()),
             }
         }
@@ -318,7 +337,11 @@ fn string_value(text: &str) -> Option<String> {
         None => (false, text),
     };
     let quote = text.chars().next().filter(|c| matches!(c, '"' | '\''))?;
-    let width = if text.len() >= 6 && text.starts_with(&quote.to_string().repeat(3)) { 3 } else { 1 };
+    let width = if text.len() >= 6 && text.starts_with(&quote.to_string().repeat(3)) {
+        3
+    } else {
+        1
+    };
     let inner = text.get(width..text.len().checked_sub(width)?)?;
     if raw {
         return Some(inner.to_owned());
@@ -361,7 +384,9 @@ fn node_after_assignment(node: Node<'_>) -> Option<Node<'_>> {
     let mut assigned = false;
     for element in node.elements() {
         match element {
-            Element::Token(token) if matches!(token.kind(), SyntaxKind::Eq | SyntaxKind::ColonEq) => {
+            Element::Token(token)
+                if matches!(token.kind(), SyntaxKind::Eq | SyntaxKind::ColonEq) =>
+            {
                 assigned = true
             }
             Element::Node(child) if assigned => return Some(child),
@@ -378,12 +403,16 @@ fn parameters_of<'a>(node: Node<'a>) -> impl Iterator<Item = Parameter<'a>> + 'a
         .filter(|param| matches!(param.kind(), SyntaxKind::Param | SyntaxKind::VarargParam))
         .map(|param| Parameter {
             name: name_of(param).unwrap_or(""),
-            type_text: param.child(SyntaxKind::TypeRef).map(|node| node.trimmed_text()),
+            type_text: param
+                .child(SyntaxKind::TypeRef)
+                .map(|node| node.trimmed_text()),
             default: node_after_assignment(param),
             is_variadic: param.kind() == SyntaxKind::VarargParam,
         })
 }
 
 fn argument_nodes<'a>(node: Node<'a>) -> impl Iterator<Item = Node<'a>> + 'a {
-    node.child(SyntaxKind::ArgList).into_iter().flat_map(|list| list.children())
+    node.child(SyntaxKind::ArgList)
+        .into_iter()
+        .flat_map(|list| list.children())
 }

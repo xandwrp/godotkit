@@ -88,8 +88,16 @@ fn ast_views_expose_class_name_extends_signals_vars_consts_funcs_enums_inner_cla
     assert_eq!(file.class_name().unwrap().name(), Some("Player"));
     let extends = file.extends().unwrap();
     assert_eq!(extends.base_text(), "\"res://actors/actor.gd\"");
-    assert_eq!(extends.base_path().as_deref(), Some("res://actors/actor.gd"));
-    assert_eq!(file.script_annotations().map(|a| a.name()).collect::<Vec<_>>(), ["tool"]);
+    assert_eq!(
+        extends.base_path().as_deref(),
+        Some("res://actors/actor.gd")
+    );
+    assert_eq!(
+        file.script_annotations()
+            .map(|a| a.name())
+            .collect::<Vec<_>>(),
+        ["tool"]
+    );
 
     let members: Vec<_> = file.members().collect();
     let summary: Vec<_> = members
@@ -122,32 +130,58 @@ fn ast_views_expose_class_name_extends_signals_vars_consts_funcs_enums_inner_cla
         ]
     );
 
-    let Member::Signal(hit) = members[1] else { panic!() };
+    let Member::Signal(hit) = members[1] else {
+        panic!()
+    };
     let params: Vec<_> = hit.parameters().map(|p| (p.name, p.type_text)).collect();
     assert_eq!(params, [("amount", Some("int")), ("source", None)]);
 
-    let Member::Var(health) = members[3] else { panic!() };
+    let Member::Var(health) = members[3] else {
+        panic!()
+    };
     assert_eq!(health.type_text(), Some("int"));
     assert_eq!(health.initializer().unwrap().trimmed_text(), "3");
     assert!(!health.is_static());
-    let Member::Var(count) = members[4] else { panic!() };
+    let Member::Var(count) = members[4] else {
+        panic!()
+    };
     assert!(count.is_static());
 
-    let Member::Func(moved) = members[7] else { panic!() };
-    let params: Vec<_> = moved.parameters().map(|p| (p.name, p.type_text, p.default.map(|d| d.trimmed_text()))).collect();
-    assert_eq!(params, [("delta", Some("float"), None), ("scale", None, Some("1.0"))]);
+    let Member::Func(moved) = members[7] else {
+        panic!()
+    };
+    let params: Vec<_> = moved
+        .parameters()
+        .map(|p| (p.name, p.type_text, p.default.map(|d| d.trimmed_text())))
+        .collect();
+    assert_eq!(
+        params,
+        [("delta", Some("float"), None), ("scale", None, Some("1.0"))]
+    );
     assert_eq!(moved.return_type_text(), Some("void"));
     assert!(moved.body().is_some());
-    let Member::Func(make) = members[8] else { panic!() };
+    let Member::Func(make) = members[8] else {
+        panic!()
+    };
     assert!(make.is_static());
 
-    let Member::Class(inner) = members[9] else { panic!() };
+    let Member::Class(inner) = members[9] else {
+        panic!()
+    };
     assert_eq!(inner.extends().unwrap().base_text(), "Node2D");
     let inner_members: Vec<_> = inner.members().filter_map(|m| m.name()).collect();
     assert_eq!(inner_members, ["inside", "Deeper"]);
-    let Some(Member::Class(deeper)) = inner.members().nth(1) else { panic!() };
+    let Some(Member::Class(deeper)) = inner.members().nth(1) else {
+        panic!()
+    };
     assert!(deeper.extends().is_none());
-    assert_eq!(deeper.members().filter_map(|m| m.name()).collect::<Vec<_>>(), ["deep"]);
+    assert_eq!(
+        deeper
+            .members()
+            .filter_map(|m| m.name())
+            .collect::<Vec<_>>(),
+        ["deep"]
+    );
 }
 
 /// `(member, [(annotation, [argument])])`
@@ -164,7 +198,12 @@ fn annotations_attach_to_the_following_declaration() {
         .map(|m| {
             let annotations = m
                 .annotations()
-                .map(|a| (a.name().to_owned(), a.arguments().into_iter().map(str::to_owned).collect()))
+                .map(|a| {
+                    (
+                        a.name().to_owned(),
+                        a.arguments().into_iter().map(str::to_owned).collect(),
+                    )
+                })
                 .collect();
             (m.name().unwrap().to_owned(), annotations)
         })
@@ -173,10 +212,19 @@ fn annotations_attach_to_the_following_declaration() {
         ("a".into(), vec![("export".into(), vec![])]),
         (
             "b".into(),
-            vec![("export_range".into(), vec!["0".into(), "10".into()]), ("onready".into(), vec![])],
+            vec![
+                ("export_range".into(), vec!["0".into(), "10".into()]),
+                ("onready".into(), vec![]),
+            ],
         ),
         ("c".into(), vec![]),
-        ("d".into(), vec![("rpc".into(), vec!["\"any_peer\"".into(), "\"call_local\"".into()])]),
+        (
+            "d".into(),
+            vec![(
+                "rpc".into(),
+                vec!["\"any_peer\"".into(), "\"call_local\"".into()],
+            )],
+        ),
     ];
     assert_eq!(annotated, expected);
 }
@@ -186,14 +234,38 @@ fn node_paths_and_string_literals_are_exposed_unquoted() {
     let source = "var a = $Body/Arm\nvar b = $\"Quoted Name/X\"\nvar c = %Unique/Child\nvar d = preload(\"res://x.tscn\")\nvar e = load('res://y\\\\z.tres')\n";
     let parsed = parse(source);
     assert!(parsed.is_valid(), "{:?}", parsed.diagnostics());
-    let paths: Vec<_> = parsed.root().descendants().filter_map(ast::GetNode::cast).map(|g| g.path()).collect();
+    let paths: Vec<_> = parsed
+        .root()
+        .descendants()
+        .filter_map(ast::GetNode::cast)
+        .map(|g| g.path())
+        .collect();
     assert_eq!(paths, ["Body/Arm", "Quoted Name/X", "%Unique/Child"]);
-    let preload = parsed.root().descendants().find_map(ast::Preload::cast).unwrap();
-    assert_eq!(ast::string_literal(preload.argument().unwrap()).as_deref(), Some("res://x.tscn"));
-    let call = parsed.root().descendants().find_map(ast::CallExpr::cast).unwrap();
+    let preload = parsed
+        .root()
+        .descendants()
+        .find_map(ast::Preload::cast)
+        .unwrap();
+    assert_eq!(
+        ast::string_literal(preload.argument().unwrap()).as_deref(),
+        Some("res://x.tscn")
+    );
+    let call = parsed
+        .root()
+        .descendants()
+        .find_map(ast::CallExpr::cast)
+        .unwrap();
     assert_eq!(call.callee_text(), "load");
-    assert_eq!(ast::string_literal(call.arguments()[0]).as_deref(), Some("res://y\\z.tres"));
-    assert!(parsed.root().descendants().any(|n| n.kind() == SyntaxKind::GetNodeExpr));
+    assert_eq!(
+        ast::string_literal(call.arguments()[0]).as_deref(),
+        Some("res://y\\z.tres")
+    );
+    assert!(
+        parsed
+            .root()
+            .descendants()
+            .any(|n| n.kind() == SyntaxKind::GetNodeExpr)
+    );
 }
 
 #[test]

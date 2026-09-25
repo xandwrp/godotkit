@@ -155,7 +155,9 @@ impl ApiIndex {
     }
     /// Native or builtin class.
     pub fn class(&self, name: &str) -> Option<&ApiClass> {
-        self.classes.get(name).or_else(|| self.builtin_classes.get(name))
+        self.classes
+            .get(name)
+            .or_else(|| self.builtin_classes.get(name))
     }
     /// `[Self, Parent, Grandparent, …]`. Stops silently at an unknown parent.
     pub fn lineage(&self, name: &str) -> Vec<&ApiClass> {
@@ -184,7 +186,11 @@ impl ApiIndex {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SearchHit<'a> {
     Class(&'a ApiClass),
-    Member { class: &'a ApiClass, kind: MemberKind, name: &'a str },
+    Member {
+        class: &'a ApiClass,
+        kind: MemberKind,
+        name: &'a str,
+    },
     Utility(&'a ApiMethod),
     GlobalEnum(&'a ApiEnum),
 }

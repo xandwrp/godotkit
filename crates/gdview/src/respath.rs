@@ -33,7 +33,10 @@ impl ResPath {
             return Err(invalid());
         }
         let mut segments = relative.split('/');
-        if segments.clone().any(|segment| matches!(segment, "" | "." | "..")) {
+        if segments
+            .clone()
+            .any(|segment| matches!(segment, "" | "." | ".."))
+        {
             return Err(invalid());
         }
         if segments.next() == Some(".godot") {
@@ -97,7 +100,11 @@ impl ResPath {
     /// True if `self` is `ancestor` or lies under it.
     pub fn starts_with(&self, ancestor: &ResPath) -> bool {
         let (path, prefix) = (self.relative(), ancestor.relative());
-        prefix.is_empty() || path == prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
+        prefix.is_empty()
+            || path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
     }
 }
 

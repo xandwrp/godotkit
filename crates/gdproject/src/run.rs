@@ -113,6 +113,10 @@ pub enum StopReason {
     NotReady,
 }
 
-pub fn run(workspace: &Workspace, engine: &Engine, request: &RunRequest) -> crate::Result<RunReport> {
+pub fn run(
+    workspace: &Workspace,
+    engine: &Engine,
+    request: &RunRequest,
+) -> crate::Result<RunReport> {
     todo!()
 }

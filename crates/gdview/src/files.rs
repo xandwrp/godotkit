@@ -46,10 +46,16 @@ impl FileQuery {
 /// Symlinks are never followed; they are returned in `WalkResult::symlinks`
 /// so callers can decide whether that is an error.
 pub fn walk(root: &Path, query: &FileQuery) -> crate::Result<WalkResult> {
-    let io_error = |path: &Path, source: std::io::Error| crate::Error::Io { path: path.to_owned(), source };
+    let io_error = |path: &Path, source: std::io::Error| crate::Error::Io {
+        path: path.to_owned(),
+        source,
+    };
     let metadata = std::fs::metadata(root).map_err(|source| io_error(root, source))?;
     if !metadata.is_dir() {
-        return Err(io_error(root, std::io::Error::new(std::io::ErrorKind::NotADirectory, "not a directory")));
+        return Err(io_error(
+            root,
+            std::io::Error::new(std::io::ErrorKind::NotADirectory, "not a directory"),
+        ));
     }
     let include_hidden = query.include_hidden;
     let respect_gdignore = query.respect_gdignore;
@@ -80,7 +86,9 @@ pub fn walk(root: &Path, query: &FileQuery) -> crate::Result<WalkResult> {
     let mut result = WalkResult::default();
     for entry in walker {
         let entry = entry.map_err(|error| io_error(root, std::io::Error::other(error)))?;
-        let Some(kind) = entry.file_type() else { continue };
+        let Some(kind) = entry.file_type() else {
+            continue;
+        };
         if kind.is_symlink() {
             result.symlinks.push(entry.into_path());
         } else if kind.is_file() && query.matches_extension(entry.path()) {

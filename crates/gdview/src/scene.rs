@@ -129,7 +129,10 @@ pub enum Value {
     Array(Vec<Value>),
     Dict(Vec<(Value, Value)>),
     /// `Vector2(1, 2)`, `NodePath("A/B")`, `ExtResource("1_abc")`, `PackedStringArray("a")`, ...
-    Call { name: String, args: Vec<Value> },
+    Call {
+        name: String,
+        args: Vec<Value>,
+    },
 }
 
 impl Value {
@@ -142,7 +145,9 @@ impl Value {
     }
     /// `ExtResource("id")` / `SubResource("id")`; format-2 integer ids are accepted.
     pub fn as_resource_ref(&self) -> Option<ResourceRef> {
-        let Value::Call { name, args } = self else { return None };
+        let Value::Call { name, args } = self else {
+            return None;
+        };
         let id = match args.as_slice() {
             [Value::Str(id)] => id.clone(),
             [Value::Int(id)] => id.to_string(),
@@ -186,13 +191,17 @@ impl SceneFile {
     /// `.` is the root; `./A` and `A` are the same node.
     pub fn node(&self, path: &NodePath) -> Option<&SceneNode> {
         let wanted = normalize(&path.0);
-        self.nodes.iter().find(|node| normalize(&node.path().0) == wanted)
+        self.nodes
+            .iter()
+            .find(|node| normalize(&node.path().0) == wanted)
     }
     pub fn children_of(&self, path: &NodePath) -> impl Iterator<Item = &SceneNode> {
         let wanted = normalize(&path.0);
-        self.nodes
-            .iter()
-            .filter(move |node| node.parent.as_ref().is_some_and(|parent| normalize(&parent.0) == wanted))
+        self.nodes.iter().filter(move |node| {
+            node.parent
+                .as_ref()
+                .is_some_and(|parent| normalize(&parent.0) == wanted)
+        })
     }
     /// The `.tscn` an inherited scene extends: a root with `instance=` and no `type`.
     pub fn inherited_base(&self) -> Option<&ExtResource> {
@@ -232,7 +241,9 @@ impl SceneSource for crate::Project {
             return Ok(None);
         }
         let source = self.read_to_string(path)?;
-        parse(&source).map(Some).map_err(|error| error.with_path(os_path))
+        parse(&source)
+            .map(Some)
+            .map_err(|error| error.with_path(os_path))
     }
 }
 

@@ -148,7 +148,6 @@ pub fn analyze(input: &NetInput<'_>) -> NetReport {
     todo!()
 }
 
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Explanation {
     pub query: String,

@@ -77,7 +77,11 @@ pub struct ParameterDeclaration {
 impl MemberDeclaration {
     /// `(required, Some(max))`, or `(required, None)` when variadic.
     pub fn arity(&self) -> (usize, Option<usize>) {
-        let required = self.parameters.iter().filter(|p| p.default.is_none() && !p.is_variadic).count();
+        let required = self
+            .parameters
+            .iter()
+            .filter(|p| p.default.is_none() && !p.is_variadic)
+            .count();
         let variadic = self.parameters.iter().any(|p| p.is_variadic);
         (required, (!variadic).then_some(self.parameters.len()))
     }
@@ -87,7 +91,9 @@ impl Named {
     /// For an `extends` written as a path, the path without quotes.
     pub fn quoted_path(&self) -> Option<&str> {
         let text = self.name.as_str();
-        ["\"", "'"].iter().find_map(|quote| text.strip_prefix(quote)?.strip_suffix(quote))
+        ["\"", "'"]
+            .iter()
+            .find_map(|quote| text.strip_prefix(quote)?.strip_suffix(quote))
     }
 }
 
@@ -135,7 +141,12 @@ impl RpcConfig {
     /// Parses `@rpc` argument texts, quoted or not. Unknown arguments are an
     /// error, not ignored. A later argument of the same kind wins, as in Godot.
     pub fn from_arguments(arguments: &[&str]) -> Result<Self, String> {
-        let mut config = RpcConfig { mode: RpcMode::Authority, call_local: false, transfer: TransferMode::Unreliable, channel: 0 };
+        let mut config = RpcConfig {
+            mode: RpcMode::Authority,
+            call_local: false,
+            transfer: TransferMode::Unreliable,
+            channel: 0,
+        };
         for argument in arguments {
             let text = argument.trim().trim_matches(|c| c == '"' || c == '\'');
             match text {
@@ -220,7 +231,10 @@ impl ProjectDeclarations {
         let mut classes: BTreeMap<&str, Vec<&ScriptDeclaration>> = BTreeMap::new();
         for script in &self.scripts {
             if let Some(class_name) = &script.declaration.class_name {
-                classes.entry(class_name.name.as_str()).or_default().push(&script.declaration);
+                classes
+                    .entry(class_name.name.as_str())
+                    .or_default()
+                    .push(&script.declaration);
             }
         }
         classes
@@ -231,8 +245,13 @@ impl ProjectDeclarations {
 pub fn index_project(project: &Project) -> crate::Result<ProjectDeclarations> {
     let mut scripts = Vec::new();
     for file in project.files(&FileQuery::with_extensions(["gd"]))? {
-        let Ok(path) = project.localize(&file) else { continue };
-        let source = std::fs::read(&file).map_err(|source| crate::Error::Io { path: file.clone(), source })?;
+        let Ok(path) = project.localize(&file) else {
+            continue;
+        };
+        let source = std::fs::read(&file).map_err(|source| crate::Error::Io {
+            path: file.clone(),
+            source,
+        })?;
         let script = match String::from_utf8(source) {
             Ok(source) => index_script(path, &source),
             Err(_) => IndexedScript {

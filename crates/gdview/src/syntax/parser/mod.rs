@@ -17,7 +17,11 @@ pub(super) fn parse(source: &str) -> RawTree {
     parser.source_file();
     errors.extend(parser.errors);
     let nodes = build_tree(parser.events, &tokens);
-    RawTree { tokens, nodes, errors }
+    RawTree {
+        tokens,
+        nodes,
+        errors,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

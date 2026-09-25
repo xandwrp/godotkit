@@ -59,7 +59,11 @@ pub struct ProjectGraph<'a> {
 
 impl<'a> ProjectGraph<'a> {
     /// Parses every `.tscn`/`.tres` the file query returns. Parse failures become findings.
-    pub fn load(project: &'a Project, declarations: &'a ProjectDeclarations, uids: &'a UidMap) -> crate::Result<Self> {
+    pub fn load(
+        project: &'a Project,
+        declarations: &'a ProjectDeclarations,
+        uids: &'a UidMap,
+    ) -> crate::Result<Self> {
         let mut files = Vec::new();
         for file in project.files(&FileQuery::default())? {
             if let Ok(path) = project.localize(&file) {
@@ -70,10 +74,15 @@ impl<'a> ProjectGraph<'a> {
         let mut scenes = Vec::new();
         let mut unparseable = Vec::new();
         for path in &files {
-            if !matches!(path.extension().map(str::to_ascii_lowercase).as_deref(), Some("tscn" | "tres")) {
+            if !matches!(
+                path.extension().map(str::to_ascii_lowercase).as_deref(),
+                Some("tscn" | "tres")
+            ) {
                 continue;
             }
-            let parsed = project.read_to_string(path).and_then(|source| crate::scene::parse(&source));
+            let parsed = project
+                .read_to_string(path)
+                .and_then(|source| crate::scene::parse(&source));
             match parsed {
                 Ok(scene) => scenes.push((path.clone(), scene)),
                 Err(error) => {
@@ -83,7 +92,10 @@ impl<'a> ProjectGraph<'a> {
                     };
                     unparseable.push(Finding {
                         kind: FindingKind::UnparseableScene,
-                        at: Location { path: path.clone(), line },
+                        at: Location {
+                            path: path.clone(),
+                            line,
+                        },
                         message: format!("cannot be parsed: {message}"),
                         target: path.to_string(),
                         suggestions: Vec::new(),
@@ -91,7 +103,14 @@ impl<'a> ProjectGraph<'a> {
                 }
             }
         }
-        Ok(Self { project, declarations, scenes, uids, unparseable, files })
+        Ok(Self {
+            project,
+            declarations,
+            scenes,
+            uids,
+            unparseable,
+            files,
+        })
     }
 
     pub fn scene(&self, path: &ResPath) -> Option<&SceneFile> {

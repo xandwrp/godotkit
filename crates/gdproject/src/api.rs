@@ -34,7 +34,11 @@ use crate::workspace::Workspace;
 pub const DEFAULT_DUMP_DEADLINE: Duration = Duration::from_secs(120);
 
 /// Dumps (or loads from cache) the native index for this engine + project.
-pub fn load_native(workspace: &Workspace, engine: &Engine, deadline: Duration) -> crate::Result<ApiIndex> {
+pub fn load_native(
+    workspace: &Workspace,
+    engine: &Engine,
+    deadline: Duration,
+) -> crate::Result<ApiIndex> {
     todo!()
 }
 
@@ -79,9 +83,17 @@ pub enum ClassView<'a> {
 }
 
 pub enum MemberLookup<'a> {
-    Found { declaring: ClassView<'a>, member: MemberView<'a> },
-    ClassMissing { suggestions: Vec<String> },
-    MemberMissing { class: ClassView<'a>, suggestions: Vec<String> },
+    Found {
+        declaring: ClassView<'a>,
+        member: MemberView<'a>,
+    },
+    ClassMissing {
+        suggestions: Vec<String>,
+    },
+    MemberMissing {
+        class: ClassView<'a>,
+        suggestions: Vec<String>,
+    },
 }
 
 pub enum MemberView<'a> {

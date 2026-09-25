@@ -104,11 +104,26 @@ pub struct InputAction {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum InputEvent {
-    Key { keycode: Option<String>, physical_keycode: Option<String>, modifiers: Vec<String> },
-    MouseButton { button: String },
-    JoypadButton { device: i64, button: String },
-    JoypadMotion { device: i64, axis: String, axis_value: f64 },
-    Other { type_name: String },
+    Key {
+        keycode: Option<String>,
+        physical_keycode: Option<String>,
+        modifiers: Vec<String>,
+    },
+    MouseButton {
+        button: String,
+    },
+    JoypadButton {
+        device: i64,
+        button: String,
+    },
+    JoypadMotion {
+        device: i64,
+        axis: String,
+        axis_value: f64,
+    },
+    Other {
+        type_name: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]

@@ -10,7 +10,10 @@ use crate::respath::{NodePath, ResPath, Uid};
 use crate::scene::{ExtResource, FileKind, Resolved, ResourceRef, SceneFile, Value};
 
 pub(super) fn run(graph: &ProjectGraph<'_>) -> Vec<Finding> {
-    let analysis = Analysis { graph, lookups: RefCell::new(HashMap::new()) };
+    let analysis = Analysis {
+        graph,
+        lookups: RefCell::new(HashMap::new()),
+    };
     let mut findings = graph.unparseable.clone();
     for (path, scene) in &graph.scenes {
         analysis.scene_references(path, scene, &mut findings);
@@ -24,7 +27,12 @@ pub(super) fn run(graph: &ProjectGraph<'_>) -> Vec<Finding> {
     analysis.onready_node_paths(&mut findings);
     analysis.duplicates(&mut findings);
     findings.sort_by(|a, b| {
-        (&a.at, a.kind as u8, &a.target, &a.message).cmp(&(&b.at, b.kind as u8, &b.target, &b.message))
+        (&a.at, a.kind as u8, &a.target, &a.message).cmp(&(
+            &b.at,
+            b.kind as u8,
+            &b.target,
+            &b.message,
+        ))
     });
     findings.dedup();
     findings
@@ -108,17 +116,29 @@ impl<'g> Analysis<'g, '_> {
 
     fn scene_references(&self, path: &ResPath, scene: &SceneFile, findings: &mut Vec<Finding>) {
         for ext in &scene.ext_resources {
-            let uid_resolves = ext.uid.as_ref().is_some_and(|uid| self.graph.uids.resolve(uid).is_some());
+            let uid_resolves = ext
+                .uid
+                .as_ref()
+                .is_some_and(|uid| self.graph.uids.resolve(uid).is_some());
             if uid_resolves || self.exists(&ext.path) {
                 continue;
             }
             let message = match &ext.uid {
-                Some(uid) => format!("ext_resource {} points at {}, which does not exist, and its {} resolves to no file", ext.id, ext.path, uid.0),
-                None => format!("ext_resource {} points at {}, which does not exist", ext.id, ext.path),
+                Some(uid) => format!(
+                    "ext_resource {} points at {}, which does not exist, and its {} resolves to no file",
+                    ext.id, ext.path, uid.0
+                ),
+                None => format!(
+                    "ext_resource {} points at {}, which does not exist",
+                    ext.id, ext.path
+                ),
             };
             findings.push(Finding {
                 kind: FindingKind::MissingResource,
-                at: Location { path: path.clone(), line: ext.line },
+                at: Location {
+                    path: path.clone(),
+                    line: ext.line,
+                },
                 message,
                 target: ext.path.to_string(),
                 suggestions: self.suggest_files(&ext.path),
@@ -147,8 +167,14 @@ impl<'g> Analysis<'g, '_> {
             {
                 findings.push(Finding {
                     kind: FindingKind::MissingResource,
-                    at: Location { path: path.clone(), line: node.line },
-                    message: format!("node {} is a placeholder for {placeholder}, which does not exist", node.path().0),
+                    at: Location {
+                        path: path.clone(),
+                        line: node.line,
+                    },
+                    message: format!(
+                        "node {} is a placeholder for {placeholder}, which does not exist",
+                        node.path().0
+                    ),
                     target: placeholder.to_string(),
                     suggestions: self.suggest_files(placeholder),
                 });
@@ -158,8 +184,14 @@ impl<'g> Analysis<'g, '_> {
 
     fn connections(&self, path: &ResPath, scene: &SceneFile, findings: &mut Vec<Finding>) {
         for connection in &scene.connections {
-            let at = Location { path: path.clone(), line: connection.line };
-            let describe = format!("signal {} from {} to {}", connection.signal, connection.from.0, connection.to.0);
+            let at = Location {
+                path: path.clone(),
+                line: connection.line,
+            };
+            let describe = format!(
+                "signal {} from {} to {}",
+                connection.signal, connection.from.0, connection.to.0
+            );
             let mut missing_node = |which: &str, node: &NodePath| {
                 findings.push(Finding {
                     kind: FindingKind::MissingNode,
@@ -181,7 +213,9 @@ impl<'g> Analysis<'g, '_> {
                 }
                 Lookup::Unknown => continue,
             };
-            let ScriptFact::Script(script) = &target.script else { continue };
+            let ScriptFact::Script(script) = &target.script else {
+                continue;
+            };
             let chain = self.chain(script);
             let Some(handler) = chain.member(MemberKind::Func, &connection.method) else {
                 if chain.complete && connection.method.starts_with('_') {
@@ -197,15 +231,23 @@ impl<'g> Analysis<'g, '_> {
             };
             // Arity: only for project-declared signals and plain connection flags
             // (deferred, persist, one-shot, reference-counted).
-            let Lookup::Found(source) = source else { continue };
-            let ScriptFact::Script(source_script) = &source.script else { continue };
+            let Lookup::Found(source) = source else {
+                continue;
+            };
+            let ScriptFact::Script(source_script) = &source.script else {
+                continue;
+            };
             if connection.flags.unwrap_or(0) & !0xF != 0 {
                 continue;
             }
-            let Some(signal) = self.chain(source_script).member(MemberKind::Signal, &connection.signal) else {
+            let Some(signal) = self
+                .chain(source_script)
+                .member(MemberKind::Signal, &connection.signal)
+            else {
                 continue;
             };
-            let emitted = signal.parameters.len() as i64 - connection.unbinds as i64 + connection.binds.len() as i64;
+            let emitted = signal.parameters.len() as i64 - connection.unbinds as i64
+                + connection.binds.len() as i64;
             let (required, max) = handler.arity();
             let fits = emitted >= required as i64 && max.is_none_or(|max| emitted <= max as i64);
             if emitted >= 0 && !fits {
@@ -236,7 +278,10 @@ impl<'g> Analysis<'g, '_> {
     fn script_references(&self, script: &IndexedScript, findings: &mut Vec<Finding>) {
         let path = &script.declaration.path;
         for used in &script.resource_uses {
-            let at = Location { path: path.clone(), line: used.line };
+            let at = Location {
+                path: path.clone(),
+                line: used.line,
+            };
             let kind = match used.kind {
                 ResourceUseKind::Extends => FindingKind::MissingBaseScript,
                 _ => FindingKind::MissingResource,
@@ -251,14 +296,19 @@ impl<'g> Analysis<'g, '_> {
                     findings.push(Finding {
                         kind: FindingKind::UnresolvedUid,
                         at,
-                        message: format!("{verb} of {}, which no file in the project claims", used.path),
+                        message: format!(
+                            "{verb} of {}, which no file in the project claims",
+                            used.path
+                        ),
                         target: used.path.clone(),
                         suggestions: Vec::new(),
                     });
                 }
                 continue;
             }
-            let Some(target) = resolve_script_path(path, &used.path) else { continue };
+            let Some(target) = resolve_script_path(path, &used.path) else {
+                continue;
+            };
             if !self.exists(&target) {
                 findings.push(Finding {
                     kind,
@@ -276,7 +326,9 @@ impl<'g> Analysis<'g, '_> {
         let owners = self.owners();
         for script in &self.graph.declarations.scripts {
             let path = &script.declaration.path;
-            let Some(owners) = owners.get(path) else { continue };
+            let Some(owners) = owners.get(path) else {
+                continue;
+            };
             for used in script.node_path_uses.iter().filter(|used| used.onready) {
                 let mut missing_everywhere = true;
                 let mut suggestions = BTreeSet::new();
@@ -287,7 +339,11 @@ impl<'g> Analysis<'g, '_> {
                             break;
                         }
                         Resolution::Missing { parent, name } => {
-                            let parent: Vec<String> = parent.segments().filter(|s| *s != ".").map(str::to_owned).collect();
+                            let parent: Vec<String> = parent
+                                .segments()
+                                .filter(|s| *s != ".")
+                                .map(str::to_owned)
+                                .collect();
                             let siblings = self.child_names(scene, &parent, 0);
                             suggestions.extend(similar(&name, siblings.iter().map(String::as_str)));
                         }
@@ -299,7 +355,8 @@ impl<'g> Analysis<'g, '_> {
                     }
                 }
                 if missing_everywhere {
-                    let scenes: BTreeSet<_> = owners.iter().map(|(scene, _)| scene.as_str()).collect();
+                    let scenes: BTreeSet<_> =
+                        owners.iter().map(|(scene, _)| scene.as_str()).collect();
                     let scenes: Vec<_> = scenes.into_iter().collect();
                     findings.push(Finding {
                         kind: FindingKind::MissingNode,
@@ -322,8 +379,14 @@ impl<'g> Analysis<'g, '_> {
             for path in paths.iter().skip(1) {
                 findings.push(Finding {
                     kind: FindingKind::DuplicateUid,
-                    at: Location { path: path.clone(), line: 1 },
-                    message: format!("{} is also claimed by {}; references to it may load the wrong file", uid.0, paths[0]),
+                    at: Location {
+                        path: path.clone(),
+                        line: 1,
+                    },
+                    message: format!(
+                        "{} is also claimed by {}; references to it may load the wrong file",
+                        uid.0, paths[0]
+                    ),
                     target: uid.0.clone(),
                     suggestions: Vec::new(),
                 });
@@ -331,11 +394,20 @@ impl<'g> Analysis<'g, '_> {
         }
         for (name, declarations) in self.graph.declarations.by_class_name() {
             for declaration in declarations.iter().skip(1) {
-                let line = declaration.class_name.as_ref().map_or(1, |named| named.line);
+                let line = declaration
+                    .class_name
+                    .as_ref()
+                    .map_or(1, |named| named.line);
                 findings.push(Finding {
                     kind: FindingKind::DuplicateClassName,
-                    at: Location { path: declaration.path.clone(), line },
-                    message: format!("class_name {name} is also declared by {}", declarations[0].path),
+                    at: Location {
+                        path: declaration.path.clone(),
+                        line,
+                    },
+                    message: format!(
+                        "class_name {name} is also declared by {}",
+                        declarations[0].path
+                    ),
                     target: name.to_owned(),
                     suggestions: Vec::new(),
                 });
@@ -348,20 +420,30 @@ impl<'g> Analysis<'g, '_> {
     fn chain(&self, script: &ResPath) -> Chain<'g> {
         let declarations = self.graph.declarations;
         let classes = declarations.by_class_name();
-        let mut chain = Chain { scripts: Vec::new(), complete: true };
+        let mut chain = Chain {
+            scripts: Vec::new(),
+            complete: true,
+        };
         let mut next = Some(script.clone());
         while let Some(path) = next.take() {
             let Some(indexed) = declarations.indexed(&path) else {
                 chain.complete = false;
                 break;
             };
-            if chain.scripts.iter().any(|seen| seen.declaration.path == path) || chain.scripts.len() > MAX_DEPTH {
+            if chain
+                .scripts
+                .iter()
+                .any(|seen| seen.declaration.path == path)
+                || chain.scripts.len() > MAX_DEPTH
+            {
                 chain.complete = false;
                 break;
             }
             chain.complete &= indexed.parse_error.is_none();
             chain.scripts.push(indexed);
-            let Some(extends) = &indexed.declaration.extends else { break };
+            let Some(extends) = &indexed.declaration.extends else {
+                break;
+            };
             if let Some(base) = extends.quoted_path() {
                 match resolve_script_path(&path, base) {
                     Some(base) => next = Some(base),
@@ -391,7 +473,10 @@ impl<'g> Analysis<'g, '_> {
             }
             for (node, script) in self.effective_scripts(scene_path, 0) {
                 for base in self.chain(&script).scripts {
-                    owners.entry(base.declaration.path.clone()).or_default().push((scene_path.clone(), node.clone()));
+                    owners
+                        .entry(base.declaration.path.clone())
+                        .or_default()
+                        .push((scene_path.clone(), node.clone()));
                 }
             }
         }
@@ -400,9 +485,13 @@ impl<'g> Analysis<'g, '_> {
 
     /// Node path -> script for nodes this scene or its inherited bases attach a script to.
     fn effective_scripts(&self, scene_path: &ResPath, depth: usize) -> BTreeMap<NodePath, ResPath> {
-        let Some(scene) = self.graph.scene(scene_path) else { return BTreeMap::new() };
+        let Some(scene) = self.graph.scene(scene_path) else {
+            return BTreeMap::new();
+        };
         let mut scripts = match scene.inherited_base() {
-            Some(base) if depth < MAX_DEPTH => self.effective_scripts(&self.ext_target(base), depth + 1),
+            Some(base) if depth < MAX_DEPTH => {
+                self.effective_scripts(&self.ext_target(base), depth + 1)
+            }
             _ => BTreeMap::new(),
         };
         for node in &scene.nodes {
@@ -412,7 +501,11 @@ impl<'g> Analysis<'g, '_> {
                     scripts.remove(&path);
                 }
                 Some(_) => {
-                    if let Some(script) = node.script.as_ref().and_then(|r| self.ext_ref_target(scene, r)) {
+                    if let Some(script) = node
+                        .script
+                        .as_ref()
+                        .and_then(|r| self.ext_ref_target(scene, r))
+                    {
                         scripts.insert(path, script);
                     }
                 }
@@ -425,7 +518,11 @@ impl<'g> Analysis<'g, '_> {
     // ---- node lookup in the effective tree -----------------------------------
 
     fn lookup(&self, scene: &ResPath, path: &NodePath) -> Lookup {
-        let segments: Vec<String> = normalized(path.clone()).segments().filter(|s| *s != ".").map(str::to_owned).collect();
+        let segments: Vec<String> = normalized(path.clone())
+            .segments()
+            .filter(|s| *s != ".")
+            .map(str::to_owned)
+            .collect();
         self.lookup_segments(scene, &segments, 0)
     }
 
@@ -443,8 +540,14 @@ impl<'g> Analysis<'g, '_> {
     }
 
     fn lookup_uncached(&self, scene_path: &ResPath, segments: &[String], depth: usize) -> Lookup {
-        let Some(scene) = self.graph.scene(scene_path) else { return Lookup::Unknown };
-        let node_path = NodePath(if segments.is_empty() { ".".into() } else { segments.join("/") });
+        let Some(scene) = self.graph.scene(scene_path) else {
+            return Lookup::Unknown;
+        };
+        let node_path = NodePath(if segments.is_empty() {
+            ".".into()
+        } else {
+            segments.join("/")
+        });
         let direct = scene.node(&node_path);
         // An inherited scene's tree starts as its base's tree, path for path.
         let from_base = match scene.inherited_base() {
@@ -455,7 +558,10 @@ impl<'g> Analysis<'g, '_> {
         let mut from_instance = Lookup::NotFound;
         for split in (1..segments.len()).rev() {
             match self.lookup_segments(scene_path, &segments[..split], depth + 1) {
-                Lookup::Found(NodeFacts { instance: Some(instanced), .. }) => {
+                Lookup::Found(NodeFacts {
+                    instance: Some(instanced),
+                    ..
+                }) => {
                     from_instance = self.lookup_segments(&instanced, &segments[split..], depth + 1);
                     break;
                 }
@@ -474,14 +580,23 @@ impl<'g> Analysis<'g, '_> {
         let Some(direct) = direct else {
             return match below {
                 Some(facts) => Lookup::Found(facts),
-                None if from_base == Lookup::Unknown || from_instance == Lookup::Unknown => Lookup::Unknown,
+                None if from_base == Lookup::Unknown || from_instance == Lookup::Unknown => {
+                    Lookup::Unknown
+                }
                 None => Lookup::NotFound,
             };
         };
-        let instance = direct.instance.as_ref().and_then(|r| self.ext_ref_target(scene, r));
+        let instance = direct
+            .instance
+            .as_ref()
+            .and_then(|r| self.ext_ref_target(scene, r));
         let script = match direct.properties.get("script") {
             Some(Value::Null) => ScriptFact::None,
-            Some(_) => match direct.script.as_ref().and_then(|r| self.ext_ref_target(scene, r)) {
+            Some(_) => match direct
+                .script
+                .as_ref()
+                .and_then(|r| self.ext_ref_target(scene, r))
+            {
                 Some(script) => ScriptFact::Script(script),
                 None => ScriptFact::Unknown,
             },
@@ -504,7 +619,11 @@ impl<'g> Analysis<'g, '_> {
         if path.starts_with('/') {
             return Resolution::Unknown;
         }
-        let mut current: Vec<String> = node.segments().filter(|s| *s != ".").map(str::to_owned).collect();
+        let mut current: Vec<String> = node
+            .segments()
+            .filter(|s| *s != ".")
+            .map(str::to_owned)
+            .collect();
         for (index, segment) in path.split('/').filter(|s| !s.is_empty()).enumerate() {
             if let Some(unique) = segment.strip_prefix('%') {
                 // `%Name` resolves among the nodes the scene root owns; later `%` segments
@@ -514,7 +633,11 @@ impl<'g> Analysis<'g, '_> {
                 }
                 match self.unique_node(scene, unique) {
                     Some(found) => current = found,
-                    None => return Resolution::MissingUnique { name: unique.to_owned() },
+                    None => {
+                        return Resolution::MissingUnique {
+                            name: unique.to_owned(),
+                        };
+                    }
                 }
                 continue;
             }
@@ -533,8 +656,15 @@ impl<'g> Analysis<'g, '_> {
                         Lookup::Found(_) => {}
                         Lookup::Unknown => return Resolution::Unknown,
                         Lookup::NotFound => {
-                            let parent = NodePath(if parent.is_empty() { ".".into() } else { parent.join("/") });
-                            return Resolution::Missing { parent, name: name.to_owned() };
+                            let parent = NodePath(if parent.is_empty() {
+                                ".".into()
+                            } else {
+                                parent.join("/")
+                            });
+                            return Resolution::Missing {
+                                parent,
+                                name: name.to_owned(),
+                            };
                         }
                     }
                 }
@@ -549,9 +679,18 @@ impl<'g> Analysis<'g, '_> {
         let mut scene_path = scene_path.clone();
         for _ in 0..MAX_DEPTH {
             let scene = self.graph.scene(&scene_path)?;
-            let found = scene.nodes.iter().find(|node| node.name == name && node.unique_name_in_owner);
+            let found = scene
+                .nodes
+                .iter()
+                .find(|node| node.name == name && node.unique_name_in_owner);
             if let Some(node) = found {
-                return Some(normalized(node.path()).segments().filter(|s| *s != ".").map(str::to_owned).collect());
+                return Some(
+                    normalized(node.path())
+                        .segments()
+                        .filter(|s| *s != ".")
+                        .map(str::to_owned)
+                        .collect(),
+                );
             }
             scene_path = self.ext_target(scene.inherited_base()?);
         }
@@ -563,9 +702,19 @@ impl<'g> Analysis<'g, '_> {
         let mut names = Vec::new();
         let mut scene_path = scene_path.clone();
         for _ in 0..MAX_DEPTH {
-            let Some(scene) = self.graph.scene(&scene_path) else { break };
-            names.extend(scene.nodes.iter().filter(|node| node.unique_name_in_owner).map(|node| node.name.clone()));
-            let Some(base) = scene.inherited_base() else { break };
+            let Some(scene) = self.graph.scene(&scene_path) else {
+                break;
+            };
+            names.extend(
+                scene
+                    .nodes
+                    .iter()
+                    .filter(|node| node.unique_name_in_owner)
+                    .map(|node| node.name.clone()),
+            );
+            let Some(base) = scene.inherited_base() else {
+                break;
+            };
             scene_path = self.ext_target(base);
         }
         names
@@ -574,18 +723,29 @@ impl<'g> Analysis<'g, '_> {
     /// Names of the children of `parent` in the effective tree, including
     /// children contributed by inherited bases and instanced scenes.
     fn child_names(&self, scene_path: &ResPath, parent: &[String], depth: usize) -> Vec<String> {
-        let Some(scene) = self.graph.scene(scene_path) else { return Vec::new() };
+        let Some(scene) = self.graph.scene(scene_path) else {
+            return Vec::new();
+        };
         if depth > MAX_DEPTH {
             return Vec::new();
         }
-        let parent_path = NodePath(if parent.is_empty() { ".".into() } else { parent.join("/") });
-        let mut names: Vec<String> = scene.children_of(&parent_path).map(|node| node.name.clone()).collect();
+        let parent_path = NodePath(if parent.is_empty() {
+            ".".into()
+        } else {
+            parent.join("/")
+        });
+        let mut names: Vec<String> = scene
+            .children_of(&parent_path)
+            .map(|node| node.name.clone())
+            .collect();
         if let Some(base) = scene.inherited_base() {
             names.extend(self.child_names(&self.ext_target(base), parent, depth + 1));
         }
         for split in (1..=parent.len()).rev() {
-            if let Lookup::Found(NodeFacts { instance: Some(instanced), .. }) =
-                self.lookup_segments(scene_path, &parent[..split], depth + 1)
+            if let Lookup::Found(NodeFacts {
+                instance: Some(instanced),
+                ..
+            }) = self.lookup_segments(scene_path, &parent[..split], depth + 1)
             {
                 names.extend(self.child_names(&instanced, &parent[split..], depth + 1));
                 break;
@@ -607,9 +767,17 @@ impl<'g> Analysis<'g, '_> {
             .map(ToString::to_string)
             .collect();
         let parent = missing.parent();
-        let siblings = self.graph.files.iter().filter(|file| file.parent() == parent);
+        let siblings = self
+            .graph
+            .files
+            .iter()
+            .filter(|file| file.parent() == parent);
         let close = similar(name, siblings.map(|file| file.file_name()));
-        suggestions.extend(close.into_iter().filter_map(|close| Some(parent.as_ref()?.join(&close).ok()?.to_string())));
+        suggestions.extend(
+            close
+                .into_iter()
+                .filter_map(|close| Some(parent.as_ref()?.join(&close).ok()?.to_string())),
+        );
         suggestions.dedup();
         suggestions.truncate(3);
         suggestions
@@ -668,12 +836,21 @@ fn similar<'n>(name: &str, candidates: impl Iterator<Item = &'n str>) -> Vec<Str
     let limit = (name.chars().count() / 3).clamp(1, 3);
     let mut scored: Vec<(usize, &str)> = candidates
         .filter(|candidate| *candidate != name)
-        .map(|candidate| (edit_distance(&name.to_lowercase(), &candidate.to_lowercase()), candidate))
+        .map(|candidate| {
+            (
+                edit_distance(&name.to_lowercase(), &candidate.to_lowercase()),
+                candidate,
+            )
+        })
         .filter(|(distance, _)| *distance <= limit)
         .collect();
     scored.sort();
     scored.dedup();
-    scored.into_iter().take(3).map(|(_, candidate)| candidate.to_owned()).collect()
+    scored
+        .into_iter()
+        .take(3)
+        .map(|(_, candidate)| candidate.to_owned())
+        .collect()
 }
 
 /// Optimal string alignment distance: Levenshtein plus adjacent transpositions,
@@ -690,7 +867,9 @@ fn edit_distance(a: &str, b: &str) -> usize {
     for i in 1..=a.len() {
         for j in 1..=b.len() {
             let cost = usize::from(a[i - 1] != b[j - 1]);
-            let mut best = (rows[i - 1][j] + 1).min(rows[i][j - 1] + 1).min(rows[i - 1][j - 1] + cost);
+            let mut best = (rows[i - 1][j] + 1)
+                .min(rows[i][j - 1] + 1)
+                .min(rows[i - 1][j - 1] + cost);
             if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
                 best = best.min(rows[i - 2][j - 2] + 1);
             }

@@ -15,12 +15,23 @@ fn parse_accepts_forward_slash_paths_and_rejects_backslashes() {
     assert!(ResPath::parse("scenes/main.tscn").is_err());
     assert!(ResPath::parse("user://save.tres").is_err());
     assert!(ResPath::parse("uid://abc").is_err());
-    assert_eq!(ResPath::from_relative("a/b.gd").unwrap(), ok("res://a/b.gd"));
+    assert_eq!(
+        ResPath::from_relative("a/b.gd").unwrap(),
+        ok("res://a/b.gd")
+    );
 }
 
 #[test]
 fn parse_rejects_dot_dot_and_empty_segments() {
-    for bad in ["res://../x", "res://a/../x", "res://a//b", "res://a/", "res:///a", "res://./a", "res://a/."] {
+    for bad in [
+        "res://../x",
+        "res://a/../x",
+        "res://a//b",
+        "res://a/",
+        "res:///a",
+        "res://./a",
+        "res://a/.",
+    ] {
         assert!(ResPath::parse(bad).is_err(), "{bad}");
     }
     assert!(ResPath::parse("res://a..b/c...d").is_ok());
@@ -30,18 +41,30 @@ fn parse_rejects_dot_dot_and_empty_segments() {
 fn parse_rejects_paths_into_dot_godot() {
     assert!(ResPath::parse("res://.godot").is_err());
     assert!(ResPath::parse("res://.godot/imported/x.ctex").is_err());
-    assert!(ResPath::parse("res://addons/.godot/x").is_ok(), "only the project's own .godot is special");
+    assert!(
+        ResPath::parse("res://addons/.godot/x").is_ok(),
+        "only the project's own .godot is special"
+    );
     assert!(ResPath::parse("res://.godotignore").is_ok());
 }
 
 #[test]
 fn extension_and_file_name_match_godot_semantics() {
     let scene = ok("res://scenes/main.tscn");
-    assert_eq!((scene.file_name(), scene.extension()), ("main.tscn", Some("tscn")));
+    assert_eq!(
+        (scene.file_name(), scene.extension()),
+        ("main.tscn", Some("tscn"))
+    );
     let script = ok("res://player.gd");
-    assert_eq!((script.file_name(), script.extension()), ("player.gd", Some("gd")));
+    assert_eq!(
+        (script.file_name(), script.extension()),
+        ("player.gd", Some("gd"))
+    );
     let import = ok("res://art/icon.png.import");
-    assert_eq!((import.file_name(), import.extension()), ("icon.png.import", Some("import")));
+    assert_eq!(
+        (import.file_name(), import.extension()),
+        ("icon.png.import", Some("import"))
+    );
     let bare = ok("res://LICENSE");
     assert_eq!((bare.file_name(), bare.extension()), ("LICENSE", None));
     assert_eq!(ok("res://").file_name(), "");

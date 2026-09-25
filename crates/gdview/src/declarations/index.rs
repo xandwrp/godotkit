@@ -14,7 +14,10 @@ pub(super) fn script(path: ResPath, source: &str) -> IndexedScript {
     let root = parsed.root();
     let file = SourceFile::cast(root).expect("parse always yields a SourceFile root");
     let class_name = file.class_name().and_then(|decl| {
-        Some(Named { name: decl.name()?.to_owned(), line: decl.node().line() })
+        Some(Named {
+            name: decl.name()?.to_owned(),
+            line: decl.node().line(),
+        })
     });
     let qualifier = class_name.as_ref().map(|named| named.name.clone());
     let (members, inner_classes) = class_members(file.members(), qualifier.as_deref());
@@ -22,12 +25,18 @@ pub(super) fn script(path: ResPath, source: &str) -> IndexedScript {
         path,
         class_name,
         extends: file.extends().map(extends),
-        is_tool: file.script_annotations().any(|annotation| annotation.name() == "tool"),
+        is_tool: file
+            .script_annotations()
+            .any(|annotation| annotation.name() == "tool"),
         members,
         inner_classes,
     };
     let parse_error = parsed.diagnostics().first().map(|diagnostic| {
-        format!("line {}: {}", parsed.line_col(diagnostic.range.start).0, diagnostic.message)
+        format!(
+            "line {}: {}",
+            parsed.line_col(diagnostic.range.start).0,
+            diagnostic.message
+        )
     });
     IndexedScript {
         resource_uses: resource_uses(&parsed, file),
@@ -38,7 +47,10 @@ pub(super) fn script(path: ResPath, source: &str) -> IndexedScript {
 }
 
 fn extends(decl: ExtendsDecl<'_>) -> Named {
-    Named { name: decl.base_text().to_owned(), line: decl.node().line() }
+    Named {
+        name: decl.base_text().to_owned(),
+        line: decl.node().line(),
+    }
 }
 
 fn class_members<'a>(
@@ -57,7 +69,8 @@ fn class_members<'a>(
                 Some(outer) => format!("{outer}.{name}"),
                 None => name.to_owned(),
             };
-            let (inner_members, inner_classes) = class_members(class.members(), Some(&qualified_name));
+            let (inner_members, inner_classes) =
+                class_members(class.members(), Some(&qualified_name));
             classes.push(InnerClassDeclaration {
                 line: class.node().line(),
                 extends: class.extends().map(extends),
@@ -71,19 +84,37 @@ fn class_members<'a>(
             .annotations()
             .map(|annotation| AnnotationDeclaration {
                 name: annotation.name().to_owned(),
-                arguments: annotation.arguments().into_iter().map(str::to_owned).collect(),
+                arguments: annotation
+                    .arguments()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
             })
             .collect();
         let rpc = annotations.iter().find(|a| a.name == "rpc").and_then(|a| {
-            RpcConfig::from_arguments(&a.arguments.iter().map(String::as_str).collect::<Vec<_>>()).ok()
+            RpcConfig::from_arguments(&a.arguments.iter().map(String::as_str).collect::<Vec<_>>())
+                .ok()
         });
         let (kind, is_static, type_text, parameters) = match item {
-            Member::Signal(signal) => (MemberKind::Signal, false, None, parameter_list(signal.parameters())),
+            Member::Signal(signal) => (
+                MemberKind::Signal,
+                false,
+                None,
+                parameter_list(signal.parameters()),
+            ),
             Member::Const(constant) => (MemberKind::Const, false, constant.type_text(), Vec::new()),
-            Member::Var(var) => (MemberKind::Var, var.is_static(), var.type_text(), Vec::new()),
-            Member::Func(func) => {
-                (MemberKind::Func, func.is_static(), func.return_type_text(), parameter_list(func.parameters()))
-            }
+            Member::Var(var) => (
+                MemberKind::Var,
+                var.is_static(),
+                var.type_text(),
+                Vec::new(),
+            ),
+            Member::Func(func) => (
+                MemberKind::Func,
+                func.is_static(),
+                func.return_type_text(),
+                parameter_list(func.parameters()),
+            ),
             Member::Enum(_) => (MemberKind::Enum, false, None, Vec::new()),
             Member::Class(_) => unreachable!("handled above"),
         };
@@ -102,7 +133,9 @@ fn class_members<'a>(
     (members, classes)
 }
 
-fn parameter_list<'a>(parameters: impl Iterator<Item = Parameter<'a>>) -> Vec<ParameterDeclaration> {
+fn parameter_list<'a>(
+    parameters: impl Iterator<Item = Parameter<'a>>,
+) -> Vec<ParameterDeclaration> {
     parameters
         .map(|parameter| ParameterDeclaration {
             name: parameter.name.to_owned(),
@@ -118,7 +151,11 @@ fn resource_uses(parsed: &Parsed, file: SourceFile<'_>) -> Vec<ResourceUse> {
     if let Some(decl) = file.extends()
         && let Some(path) = decl.base_path()
     {
-        uses.push(ResourceUse { kind: ResourceUseKind::Extends, path, line: decl.node().line() });
+        uses.push(ResourceUse {
+            kind: ResourceUseKind::Extends,
+            path,
+            line: decl.node().line(),
+        });
     }
     for node in parsed.root().descendants() {
         let (kind, argument) = if let Some(preload) = ast::Preload::cast(node) {
@@ -133,7 +170,11 @@ fn resource_uses(parsed: &Parsed, file: SourceFile<'_>) -> Vec<ResourceUse> {
         if let Some(argument) = argument
             && let Some(path) = ast::string_literal(argument)
         {
-            uses.push(ResourceUse { kind, path, line: argument.line() });
+            uses.push(ResourceUse {
+                kind,
+                path,
+                line: argument.line(),
+            });
         }
     }
     uses
@@ -143,7 +184,9 @@ fn node_path_uses(file: SourceFile<'_>) -> Vec<NodePathUse> {
     let onready: Vec<Node<'_>> = file
         .members()
         .filter_map(|member| match member {
-            Member::Var(var) if member.annotations().any(|a| a.name() == "onready") => var.initializer(),
+            Member::Var(var) if member.annotations().any(|a| a.name() == "onready") => {
+                var.initializer()
+            }
             _ => None,
         })
         .collect();
@@ -160,13 +203,20 @@ fn node_path_uses(file: SourceFile<'_>) -> Vec<NodePathUse> {
             get_node.path()
         } else if let Some(call) = ast::CallExpr::cast(node)
             && matches!(call.callee_text(), "get_node" | "self.get_node")
-            && let Some(path) = call.arguments().first().and_then(|arg| ast::string_literal(*arg))
+            && let Some(path) = call
+                .arguments()
+                .first()
+                .and_then(|arg| ast::string_literal(*arg))
         {
             path
         } else {
             continue;
         };
-        uses.push(NodePathUse { path, line: node.line(), onready: in_onready(node) });
+        uses.push(NodePathUse {
+            path,
+            line: node.line(),
+            onready: in_onready(node),
+        });
     }
     uses
 }

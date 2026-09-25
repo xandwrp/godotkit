@@ -38,10 +38,14 @@ impl UidMap {
         };
         let mut claims: Vec<(Uid, ResPath)> = Vec::new();
         for file in project.files(&query)? {
-            let Ok(res) = project.localize(&file) else { continue };
+            let Ok(res) = project.localize(&file) else {
+                continue;
+            };
             let extension = res.extension().unwrap_or_default().to_ascii_lowercase();
             // Unreadable or non-UTF-8 files carry no uid we can use; the engine phase reports them.
-            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
             let (target, uid) = match extension.as_str() {
                 "uid" => (strip_suffix(&res, ".uid"), sidecar_uid(&text)),
                 "import" => (strip_suffix(&res, ".import"), import_uid(&text)),
@@ -60,11 +64,18 @@ impl UidMap {
         let mut map = Self::default();
         let mut claimants: BTreeMap<Uid, Vec<ResPath>> = BTreeMap::new();
         for (uid, path) in claims {
-            map.by_uid.entry(uid.clone()).or_insert_with(|| path.clone());
-            map.by_path.entry(path.clone()).or_insert_with(|| uid.clone());
+            map.by_uid
+                .entry(uid.clone())
+                .or_insert_with(|| path.clone());
+            map.by_path
+                .entry(path.clone())
+                .or_insert_with(|| uid.clone());
             claimants.entry(uid).or_default().push(path);
         }
-        map.duplicates = claimants.into_iter().filter(|(_, paths)| paths.len() > 1).collect();
+        map.duplicates = claimants
+            .into_iter()
+            .filter(|(_, paths)| paths.len() > 1)
+            .collect();
         map
     }
     pub fn resolve(&self, uid: &Uid) -> Option<&ResPath> {
@@ -80,7 +91,9 @@ fn strip_suffix(path: &ResPath, suffix: &str) -> Option<ResPath> {
 }
 
 fn is_uid(text: &str) -> bool {
-    text.len() > "uid://".len() && text.starts_with("uid://") && text.bytes().all(|b| b.is_ascii_graphic() && b != b'"')
+    text.len() > "uid://".len()
+        && text.starts_with("uid://")
+        && text.bytes().all(|b| b.is_ascii_graphic() && b != b'"')
 }
 
 /// A `.uid` sidecar holds the uid on its first line.
@@ -94,7 +107,10 @@ fn import_uid(text: &str) -> Option<String> {
     let mut section = "";
     for line in text.lines() {
         let line = line.trim();
-        if let Some(name) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+        if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
             section = name;
         } else if section == "remap"
             && let Some(value) = line.strip_prefix("uid=")

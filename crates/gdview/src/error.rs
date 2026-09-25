@@ -23,7 +23,10 @@ pub enum Error {
         message: String,
     },
     #[error("scene {}: {message}", path.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "<input>".into()))]
-    Scene { path: Option<PathBuf>, message: String },
+    Scene {
+        path: Option<PathBuf>,
+        message: String,
+    },
     #[error("scene expansion: {0}")]
     Expansion(String),
     #[error("variant json: {0}")]
@@ -36,8 +39,22 @@ impl Error {
     /// Attaches a file path to a `Parse` or `Scene` error that was produced from a string.
     pub fn with_path(self, path: PathBuf) -> Self {
         match self {
-            Error::Parse { path: None, line, message } => Error::Parse { path: Some(path), line, message },
-            Error::Scene { path: None, message } => Error::Scene { path: Some(path), message },
+            Error::Parse {
+                path: None,
+                line,
+                message,
+            } => Error::Parse {
+                path: Some(path),
+                line,
+                message,
+            },
+            Error::Scene {
+                path: None,
+                message,
+            } => Error::Scene {
+                path: Some(path),
+                message,
+            },
             other => other,
         }
     }

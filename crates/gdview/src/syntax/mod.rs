@@ -58,7 +58,10 @@ impl Parsed {
         &self.source
     }
     pub fn root(&self) -> Node<'_> {
-        Node { parsed: self, id: 0 }
+        Node {
+            parsed: self,
+            id: 0,
+        }
     }
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
@@ -131,7 +134,10 @@ impl<'a> Node<'a> {
         &self.parsed.nodes[self.id as usize]
     }
     fn at(&self, id: NodeId) -> Node<'a> {
-        Node { parsed: self.parsed, id: id.0 as u32 }
+        Node {
+            parsed: self.parsed,
+            id: id.0 as u32,
+        }
     }
     pub fn kind(&self) -> SyntaxKind {
         self.data().kind
@@ -169,10 +175,13 @@ impl<'a> Node<'a> {
     /// Child nodes, in source order. Tokens are not nodes.
     pub fn children(self) -> impl Iterator<Item = Node<'a>> + 'a {
         let node = self;
-        self.data().children.iter().filter_map(move |element| match element {
-            ElementId::Node(id) => Some(node.at(*id)),
-            ElementId::Token(_) => None,
-        })
+        self.data()
+            .children
+            .iter()
+            .filter_map(move |element| match element {
+                ElementId::Node(id) => Some(node.at(*id)),
+                ElementId::Token(_) => None,
+            })
     }
     /// Pre-order traversal of this subtree, self included.
     pub fn descendants(self) -> impl Iterator<Item = Node<'a>> + 'a {
@@ -189,13 +198,16 @@ impl<'a> Node<'a> {
     /// Children in order, nodes and tokens interleaved.
     pub(crate) fn elements(self) -> impl Iterator<Item = Element<'a>> + 'a {
         let node = self;
-        self.data().children.iter().map(move |element| match element {
-            ElementId::Node(id) => Element::Node(node.at(*id)),
-            ElementId::Token(index) => Element::Token(TokenRef {
-                parsed: node.parsed,
-                token: &node.parsed.tokens[*index],
-            }),
-        })
+        self.data()
+            .children
+            .iter()
+            .map(move |element| match element {
+                ElementId::Node(id) => Element::Node(node.at(*id)),
+                ElementId::Token(index) => Element::Token(TokenRef {
+                    parsed: node.parsed,
+                    token: &node.parsed.tokens[*index],
+                }),
+            })
     }
     /// Every token in the subtree, in source order.
     pub(crate) fn tokens(self) -> impl Iterator<Item = TokenRef<'a>> + 'a {

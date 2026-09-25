@@ -67,7 +67,10 @@ pub fn status(endpoint: &ProbeEndpoint, deadline: Duration) -> crate::Result<Sta
     todo!()
 }
 
-pub fn checkpoints(endpoint: &ProbeEndpoint, deadline: Duration) -> crate::Result<CheckpointObservation> {
+pub fn checkpoints(
+    endpoint: &ProbeEndpoint,
+    deadline: Duration,
+) -> crate::Result<CheckpointObservation> {
     todo!()
 }
 

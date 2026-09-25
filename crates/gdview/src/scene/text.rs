@@ -3,8 +3,7 @@
 //! Godot's variant text format and may span lines.
 
 use super::{
-    Connection, ExtResource, FileKind, Properties, SceneFile, SceneNode, SubResource,
-    Value,
+    Connection, ExtResource, FileKind, Properties, SceneFile, SceneNode, SubResource, Value,
 };
 use crate::respath::{NodePath, ResPath, Uid};
 
@@ -62,9 +61,9 @@ pub(super) fn parse(source: &str) -> crate::Result<SceneFile> {
                     unbinds: header.int("unbinds").unwrap_or(0) as u32,
                     line,
                 }),
-                "editable" => {
-                    file.editable_instances.push(NodePath(header.required_string("path", line)?))
-                }
+                "editable" => file
+                    .editable_instances
+                    .push(NodePath(header.required_string("path", line)?)),
                 "resource" => {
                     file.resource.get_or_insert_with(Properties::new);
                     target = Target::Resource;
@@ -83,21 +82,35 @@ pub(super) fn parse(source: &str) -> crate::Result<SceneFile> {
             return Err(error(line, "property before the file header"));
         };
         match target {
-            Target::None => return Err(error(line, &format!("property `{key}` outside any section"))),
+            Target::None => {
+                return Err(error(
+                    line,
+                    &format!("property `{key}` outside any section"),
+                ));
+            }
             Target::Node => {
                 let node = file.nodes.last_mut().expect("target set after push");
                 match key.as_str() {
                     "script" => node.script = value.as_resource_ref(),
-                    "unique_name_in_owner" => node.unique_name_in_owner = value == Value::Bool(true),
+                    "unique_name_in_owner" => {
+                        node.unique_name_in_owner = value == Value::Bool(true)
+                    }
                     _ => {}
                 }
                 node.properties.insert(key, value);
             }
             Target::SubResource => {
-                file.sub_resources.last_mut().expect("target set after push").properties.insert(key, value);
+                file.sub_resources
+                    .last_mut()
+                    .expect("target set after push")
+                    .properties
+                    .insert(key, value);
             }
             Target::Resource => {
-                file.resource.as_mut().expect("target set on [resource]").insert(key, value);
+                file.resource
+                    .as_mut()
+                    .expect("target set on [resource]")
+                    .insert(key, value);
             }
         }
     }
@@ -118,14 +131,23 @@ enum Target {
 }
 
 fn error(line: usize, message: &str) -> crate::Error {
-    crate::Error::Parse { path: None, line, message: message.to_owned() }
+    crate::Error::Parse {
+        path: None,
+        line,
+        message: message.to_owned(),
+    }
 }
 
 fn start_file(header: &Header, line: usize) -> crate::Result<SceneFile> {
     let kind = match header.tag.as_str() {
         "gd_scene" => FileKind::Scene,
         "gd_resource" => FileKind::Resource,
-        other => return Err(error(line, &format!("expected [gd_scene] or [gd_resource], found [{other}]"))),
+        other => {
+            return Err(error(
+                line,
+                &format!("expected [gd_scene] or [gd_resource], found [{other}]"),
+            ));
+        }
     };
     Ok(SceneFile {
         kind,
@@ -146,7 +168,12 @@ fn node(header: &Header, line: usize, first: bool) -> crate::Result<SceneNode> {
     let parent = header.string("parent").map(NodePath);
     match (first, &parent) {
         (true, Some(_)) => return Err(error(line, "the first node must be the root (no parent)")),
-        (false, None) => return Err(error(line, &format!("node `{name}` has no parent; only the first node may be the root"))),
+        (false, None) => {
+            return Err(error(
+                line,
+                &format!("node `{name}` has no parent; only the first node may be the root"),
+            ));
+        }
         _ => {}
     }
     let groups = match header.get("groups") {
@@ -160,11 +187,18 @@ fn node(header: &Header, line: usize, first: bool) -> crate::Result<SceneNode> {
     };
     let instance = match header.get("instance") {
         None => None,
-        Some(value) => Some(value.as_resource_ref().ok_or_else(|| error(line, "instance must be ExtResource(…)"))?),
+        Some(value) => Some(
+            value
+                .as_resource_ref()
+                .ok_or_else(|| error(line, "instance must be ExtResource(…)"))?,
+        ),
     };
     let instance_placeholder = match header.string("instance_placeholder") {
         None => None,
-        Some(path) => Some(ResPath::parse(&path).map_err(|_| error(line, &format!("invalid instance_placeholder path {path:?}")))?),
+        Some(path) => Some(
+            ResPath::parse(&path)
+                .map_err(|_| error(line, &format!("invalid instance_placeholder path {path:?}")))?,
+        ),
     };
     Ok(SceneNode {
         name,
@@ -187,7 +221,10 @@ struct Header {
 
 impl Header {
     fn get(&self, key: &str) -> Option<&Value> {
-        self.attributes.iter().find(|(name, _)| name == key).map(|(_, value)| value)
+        self.attributes
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
     }
     fn string(&self, key: &str) -> Option<String> {
         self.get(key).and_then(Value::as_str).map(str::to_owned)
@@ -196,7 +233,8 @@ impl Header {
         self.get(key).and_then(Value::as_int)
     }
     fn required_string(&self, key: &str, line: usize) -> crate::Result<String> {
-        self.string(key).ok_or_else(|| error(line, &format!("[{}] requires a string `{key}`", self.tag)))
+        self.string(key)
+            .ok_or_else(|| error(line, &format!("[{}] requires a string `{key}`", self.tag)))
     }
     /// String ids (format 3) or integer ids (format 2).
     fn id(&self, line: usize) -> crate::Result<String> {
@@ -208,7 +246,12 @@ impl Header {
     }
     fn res_path(&self, key: &str, line: usize) -> crate::Result<ResPath> {
         let path = self.required_string(key, line)?;
-        ResPath::parse(&path).map_err(|_| error(line, &format!("`{key}` is not a valid res:// path: {path:?}")))
+        ResPath::parse(&path).map_err(|_| {
+            error(
+                line,
+                &format!("`{key}` is not a valid res:// path: {path:?}"),
+            )
+        })
     }
 }
 
@@ -285,16 +328,24 @@ impl Cursor<'_> {
                     self.bump();
                     break;
                 }
-                None | Some('\n' | '\r') => return Err(error(line, &format!("unterminated [{tag}] header"))),
+                None | Some('\n' | '\r') => {
+                    return Err(error(line, &format!("unterminated [{tag}] header")));
+                }
                 _ => {}
             }
             let key = self.identifier();
             if key.is_empty() {
-                return Err(error(line, &format!("malformed attribute in [{tag}] header")));
+                return Err(error(
+                    line,
+                    &format!("malformed attribute in [{tag}] header"),
+                ));
             }
             self.skip_inline_space();
             if !self.eat('=') {
-                return Err(error(line, &format!("expected `=` after `{key}` in [{tag}] header")));
+                return Err(error(
+                    line,
+                    &format!("expected `=` after `{key}` in [{tag}] header"),
+                ));
             }
             self.skip_inline_space();
             let value = self.value()?;
@@ -302,7 +353,10 @@ impl Cursor<'_> {
         }
         self.skip_inline_space();
         if !matches!(self.peek(), None | Some('\n' | '\r' | ';')) {
-            return Err(error(line, &format!("unexpected text after [{tag}] header")));
+            return Err(error(
+                line,
+                &format!("unexpected text after [{tag}] header"),
+            ));
         }
         Ok(Header { tag, attributes })
     }
@@ -343,7 +397,10 @@ impl Cursor<'_> {
             Some('^') => {
                 self.bump();
                 let path = self.string()?;
-                Ok(Value::Call { name: "NodePath".into(), args: vec![Value::Str(path)] })
+                Ok(Value::Call {
+                    name: "NodePath".into(),
+                    args: vec![Value::Str(path)],
+                })
             }
             Some('[') => {
                 self.bump();
@@ -450,7 +507,10 @@ impl Cursor<'_> {
             return match word.as_str() {
                 "inf" if negative => Ok(Value::Float(f64::NEG_INFINITY)),
                 "inf" => Ok(Value::Float(f64::INFINITY)),
-                _ => Err(self.err(&format!("invalid number `{}`", &self.source[start..self.offset]))),
+                _ => Err(self.err(&format!(
+                    "invalid number `{}`",
+                    &self.source[start..self.offset]
+                ))),
             };
         }
         let mut float = false;
@@ -458,7 +518,8 @@ impl Cursor<'_> {
             match c {
                 '0'..='9' => {}
                 '.' | 'e' | 'E' => float = true,
-                '-' | '+' if matches!(self.source[..self.offset].chars().last(), Some('e' | 'E')) => {}
+                '-' | '+'
+                    if matches!(self.source[..self.offset].chars().last(), Some('e' | 'E')) => {}
                 _ => break,
             }
             self.bump();
@@ -519,16 +580,27 @@ mod tests {
     #[test]
     fn nested_values_span_lines() {
         let file = parse("[gd_resource type=\"Resource\" format=3]\n\n[resource]\nitems = [{\n\"a\": Vector2(1, -2.5e-05),\n}, &\"sn\", ^\"A/B\", Array[int]([1, 2]), inf, -inf]\n").unwrap();
-        let Value::Array(items) = &file.resource.as_ref().unwrap()["items"] else { panic!() };
+        let Value::Array(items) = &file.resource.as_ref().unwrap()["items"] else {
+            panic!()
+        };
         assert_eq!(items.len(), 6);
         assert_eq!(
             items[0],
             Value::Dict(vec![(
                 Value::Str("a".into()),
-                Value::Call { name: "Vector2".into(), args: vec![Value::Int(1), Value::Float(-2.5e-05)] }
+                Value::Call {
+                    name: "Vector2".into(),
+                    args: vec![Value::Int(1), Value::Float(-2.5e-05)]
+                }
             )])
         );
-        assert_eq!(items[3], Value::Call { name: "Array[int]".into(), args: vec![Value::Array(vec![Value::Int(1), Value::Int(2)])] });
+        assert_eq!(
+            items[3],
+            Value::Call {
+                name: "Array[int]".into(),
+                args: vec![Value::Array(vec![Value::Int(1), Value::Int(2)])]
+            }
+        );
         assert_eq!(items[5], Value::Float(f64::NEG_INFINITY));
     }
 }
