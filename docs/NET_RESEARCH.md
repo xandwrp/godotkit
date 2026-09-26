@@ -1,8 +1,10 @@
 # Net research follow-up
 
 Pre-implementation evidence for [NET_SCOPE.md](NET_SCOPE.md). Statements about
-current code below describe the research baseline; the first implementation slice
-subsequently corrected literal RPC argument handling and retained annotation errors.
+current code below describe the research baseline, not today's implementation.
+The first slice corrected literal RPC argument handling and retained annotation
+errors; net has since landed end to end. See NET_SCOPE.md for delivered behavior,
+explicit limits and the committed shared-fixture differential test.
 
 ## Method
 

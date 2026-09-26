@@ -29,6 +29,7 @@ pub fn of(path: &str) -> Status {
         | "config list"
         | "refs"
         | "autoloads"
+        | "net"
         | "settings input"
         | "settings layers"
         | "settings window"

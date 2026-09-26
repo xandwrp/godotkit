@@ -224,7 +224,7 @@ fn static_check_baseline_file_isolates_new_findings() {
 
 #[test]
 #[ignore = "scaffold"]
-fn scene_tree_and_net_need_no_engine() {
+fn scene_tree_needs_no_engine() {
     todo!()
 }
 

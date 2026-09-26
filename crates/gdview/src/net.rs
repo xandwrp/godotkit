@@ -1,43 +1,70 @@
-//! Static multiplayer analysis: what the project's sources say about RPCs,
-//! replication, and authority. Observations, not lint. Unknowns stay explicit.
-//! Pure function of declarations + scenes + autoloads. No engine is involved;
-//! `gdkit net` is entirely offline.
+//! Offline multiplayer observations, not runtime compatibility or lint verdicts.
+//! `scan_script` reads syntax; `analyze` links supplied observations and authored
+//! scenes; `analyze_project` performs read-only discovery. Unknowns stay explicit.
+//! See docs/NET_SCOPE.md for the delivered contract and explicit limits.
 //!
-//! # Tests (tests/net.rs)
+//! # Acceptance tests (tests/net.rs; all implemented, offline)
 //! - `finds_rpc_endpoints_from_annotations_with_godot_defaults`
-//! - `finds_rpc_calls_in_every_form` (`rpc("m")`, `rpc_id(1,"m")`, `self.rpc`, `node.rpc_id`, `Callable.rpc`, `multiplayer.rpc`)
+//! - `finds_rpc_calls_in_every_form`
 //! - `does_not_classify_os_get_unique_id_as_authority_use`
 //! - `finds_spawners_and_synchronizers_with_replication_config_properties`
 //! - `old_format_replication_configs_respect_sync_false`
 //! - `scene_anchors_match_set_multiplayer_subtree_roots`
 //! - `receiver_resolution_prefers_same_scene_before_global_labels`
 //! - `inner_class_rpcs_are_reported`
-//! - `report_json_is_deterministic_across_runs` (no HashMap iteration)
+//! - `report_json_is_deterministic_across_runs`
 //! - `explain_matches_method_receiver_method_scene_and_node_queries`
+//!
+//! Additional regression gates: net_edges.rs, net_paths.rs, net_schema.rs, net_syntax.rs;
+//! CLI no-engine/no-write tests in tests/net_cli.rs; shared-fixture differential
+//! check in gdproject/tests/net_real.rs (opt-in engine, executed on scratch only).
 
-use serde::Serialize;
-
-use crate::declarations::{ProjectDeclarations, RpcConfig};
+use crate::autoload::ResolvedAutoload;
 use crate::respath::{NodePath, ResPath};
 use crate::scene::SceneFile;
+use crate::uid::UidMap;
+use serde::Serialize;
 
-pub const NET_REPORT_SCHEMA_VERSION: u32 = 2;
+mod analysis;
+mod explanation;
+mod project;
+mod replication;
+mod source;
+pub use analysis::analyze;
+pub use explanation::explain;
+pub use project::analyze_project;
+pub use source::scan_script;
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+/// Refactor shape; deliberately distinct from legacy's incompatible version 2.
+pub const NET_REPORT_SCHEMA_VERSION: u32 = 3;
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NetReport {
     pub schema_version: u32,
+    pub coverage: Coverage,
     pub endpoints: Vec<RpcEndpoint>,
     pub calls: Vec<RpcCall>,
+    pub anchors: Vec<ScriptAnchor>,
+    pub contexts: Vec<MultiplayerContext>,
     pub spawners: Vec<Spawner>,
     pub synchronizers: Vec<Synchronizer>,
     pub authority_uses: Vec<AuthorityUse>,
     pub autoloads: Vec<NetAutoload>,
-    /// Sorted, deduplicated.
+    /// Sorted and deduplicated. Unknowns do not make this observation report fail.
     pub unknowns: Vec<Unknown>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Coverage {
+    pub scripts_scanned: usize,
+    pub scenes_scanned: usize,
+    pub resources_scanned: usize,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct SourceLocation {
+    #[serde(rename = "resource")]
     pub path: ResPath,
     pub line: usize,
 }
@@ -45,22 +72,30 @@ pub struct SourceLocation {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RpcEndpoint {
     pub script: ResPath,
-    /// `Outer.Inner` for inner classes, `None` at top level.
+    /// Qualified inner class, None for the script's outer class.
     pub class: Option<String>,
     pub method: String,
-    pub config: RpcConfig,
+    pub config: crate::declarations::RpcConfig,
     pub location: SourceLocation,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RpcCall {
     pub location: SourceLocation,
+    pub class: Option<String>,
     pub form: CallForm,
-    /// Receiver expression text, `None` for implicit self.
+    /// Entire authored call, preserving dynamic method/peer expressions.
+    pub expression: String,
+    /// Receiver text, None for implicit self. For unresolved Callables this is
+    /// the callable expression, not a proven target node.
     pub receiver: Option<String>,
+    /// A local/non-alias member binding must not accidentally resolve to an
+    /// autoload or @onready field.
+    pub receiver_is_local: bool,
     pub method: Option<String>,
     pub target_peer: Option<String>,
-    /// Endpoints this call could reach, by index into `NetReport::endpoints`.
+    /// Source candidates, NOT proof of runtime compatibility. Indexes into the
+    /// enclosing report's endpoints (remapped for Explanation).
     pub candidates: Vec<usize>,
 }
 
@@ -71,6 +106,8 @@ pub enum CallForm {
     RpcId,
     CallableRpc,
     MultiplayerRpc,
+    /// Syntax alone cannot distinguish Node.rpc from Callable.rpc or a custom method.
+    AmbiguousRpc,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -94,8 +131,8 @@ pub struct Synchronizer {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SyncedProperty {
     pub path: NodePath,
-    pub mode: SyncMode,
-    pub watch: bool,
+    pub spawn: Option<bool>,
+    pub mode: Option<SyncMode>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -109,13 +146,15 @@ pub enum SyncMode {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AuthorityUse {
     pub location: SourceLocation,
+    pub class: Option<String>,
     pub call: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NetAutoload {
-    pub name: String,
-    pub path: ResPath,
+    #[serde(flatten)]
+    pub autoload: ResolvedAutoload,
+    /// Positive source evidence only; false is not proof of no networking.
     pub networked: bool,
 }
 
@@ -125,40 +164,78 @@ pub struct Unknown {
     pub message: String,
 }
 
-impl PartialOrd for SourceLocation {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ScriptAnchor {
+    pub script: ResPath,
+    pub scene: Option<ResPath>,
+    /// Relative to the authored scene root; absolute for script autoloads.
+    pub node: NodePath,
+    /// Only established for autoload trees. Ordinary scene placement is unknown.
+    pub runtime_path: Option<NodePath>,
+    /// Observed contexts matching a known runtime path, never assumed active.
+    pub context_candidates: Vec<usize>,
 }
-impl Ord for SourceLocation {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (&self.path, self.line).cmp(&(&other.path, other.line))
-    }
-}
-impl Eq for SourceLocation {}
 
-/// Scenes to analyze, already parsed. Callers decide which files to load.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MultiplayerContext {
+    pub location: SourceLocation,
+    pub api: Option<String>,
+    /// Empty means the API's default context; None means dynamic/invalid.
+    pub root: Option<NodePath>,
+}
+
+/// Parsed source observations, with no file I/O or endpoint linking.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ScriptObservations {
+    pub script: ResPath,
+    pub endpoints: Vec<RpcEndpoint>,
+    pub calls: Vec<RpcCall>,
+    pub authority_uses: Vec<AuthorityUse>,
+    pub contexts: Vec<MultiplayerContext>,
+    pub unknowns: Vec<Unknown>,
+    /// Direct @onready node aliases only, not a dataflow claim.
+    pub bindings: Vec<NodeBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NodeBinding {
+    pub class: Option<String>,
+    pub name: String,
+    pub path: NodePath,
+}
+
+/// All inputs are caller-owned and read-only. Text resources are included in
+/// scenes so external replication configs can be inspected without engine loads.
 pub struct NetInput<'a> {
-    pub declarations: &'a ProjectDeclarations,
-    pub scenes: Vec<(ResPath, &'a SceneFile)>,
-    pub autoloads: &'a crate::autoload::Autoloads,
-}
-
-pub fn analyze(input: &NetInput<'_>) -> NetReport {
-    todo!()
+    pub scripts: &'a [ScriptObservations],
+    pub scenes: &'a [(ResPath, SceneFile)],
+    pub autoloads: &'a [ResolvedAutoload],
+    pub uids: &'a UidMap,
+    pub unknowns: &'a [Unknown],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Explanation {
+    pub schema_version: u32,
     pub query: String,
+    pub matched: bool,
+    pub contexts: Vec<MultiplayerContext>,
     pub endpoints: Vec<RpcEndpoint>,
     pub calls: Vec<RpcCall>,
+    pub anchors: Vec<ScriptAnchor>,
     pub synchronizers: Vec<Synchronizer>,
     pub spawners: Vec<Spawner>,
+    pub authority_uses: Vec<AuthorityUse>,
+    pub unknowns: Vec<Unknown>,
     pub notes: Vec<String>,
 }
 
-/// `method`, `receiver.method`, a scene path, or a replication node path.
-pub fn explain(report: &NetReport, query: &str) -> Explanation {
-    todo!()
+fn unknown(unknowns: &mut Vec<Unknown>, path: &ResPath, line: usize, message: impl Into<String>) {
+    unknowns.push(Unknown {
+        location: Some(SourceLocation {
+            path: path.clone(),
+            line,
+        }),
+        message: message.into(),
+    });
 }
