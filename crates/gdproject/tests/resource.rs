@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use gdproject::config::SelectionSource;
 use gdproject::engine::Engine;
-use gdproject::resource::{self, DEFAULT_DEADLINE};
+use gdproject::resource::{self, CreateSpec, DEFAULT_DEADLINE};
 use gdproject::runner::{self, Invocation};
 use gdproject::{Error, Workspace};
 use gdview::ResPath;
@@ -221,15 +221,141 @@ fn schema_rejects_a_success_envelope_without_a_payload() {
 }
 
 #[test]
-#[ignore = "scaffold"]
 fn spec_validation_rejects_bad_targets_paths_and_variants() {
-    todo!()
+    let spec = CreateSpec::from_json(&json!({
+        "script": "res://weapon.gd",
+        "properties": {"damage": 3, "offset": {"$variant": {"type": "Vector3", "value": [1, 2, 3]}}},
+    }))
+    .unwrap();
+    assert_eq!(spec.target, script("res://weapon.gd"));
+    assert_eq!(spec.properties.len(), 2);
+    assert!(
+        CreateSpec::from_json(&json!({"class": "Curve"}))
+            .unwrap()
+            .properties
+            .is_empty()
+    );
+
+    for (value, expected) in [
+        (json!("res://weapon.gd"), "invalid resource spec"),
+        (json!({}), "exactly one of class or script"),
+        (json!({"class": ""}), "class must be a class name"),
+        (
+            json!({"class": "Curve", "script": "res://a.gd"}),
+            "exactly one of class or script",
+        ),
+        (json!({"script": "weapon.gd"}), "saved res:// script path"),
+        (
+            json!({"script": "res://.godot/x.gd"}),
+            "saved res:// script path",
+        ),
+        (
+            json!({"script": "res://a.tscn::GDScript_1"}),
+            "saved res:// script path",
+        ),
+        (
+            json!({"class": "Curve", "path": "res://x.tres"}),
+            "unknown resource spec field \"path\"",
+        ),
+        (
+            json!({"class": "Curve", "properties": [1]}),
+            "properties must be an object",
+        ),
+        (
+            json!({"class": "Curve", "properties": {"n": 9007199254740993_i64}}),
+            "at /properties/n",
+        ),
+        (
+            json!({"class": "Curve", "properties": {"v": {"$variant": {"type": "Vector9", "value": []}}}}),
+            "at /properties/v",
+        ),
+        (
+            json!({"class": "Curve", "properties": {"r": {"$ref": "res://../x.tres"}}}),
+            "at /properties/r",
+        ),
+        (
+            json!({"class": "Curve", "properties": {"x": {"$resource": {"class": "Curve", "script": "res://a.gd"}}}}),
+            "at /properties/x/$resource",
+        ),
+    ] {
+        let error = CreateSpec::from_json(&value).unwrap_err().to_string();
+        assert!(error.contains(expected), "{value}: {error}");
+    }
 }
 
 #[test]
-#[ignore = "scaffold"]
 fn destination_must_be_new_tres_inside_project() {
-    todo!()
+    let (dir, workspace) = project(&[
+        ("weapons/rifle.tres", "[gd_resource format=3]\n"),
+        ("notes.txt", ""),
+    ]);
+    let out = |path: &str| ResPath::parse(path).unwrap();
+    assert_eq!(
+        resource::check_destination(&workspace, &out("res://weapons/shotgun.tres")).unwrap(),
+        dir.path().join("weapons/shotgun.tres")
+    );
+    assert_eq!(
+        resource::check_destination(&workspace, &out("res://top.tres")).unwrap(),
+        dir.path().join("top.tres")
+    );
+    fs::create_dir(dir.path().join("elsewhere")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.path().join("elsewhere"), dir.path().join("linked")).unwrap();
+    let mut cases = vec![
+        ("res://weapons/shotgun.res", "must name a .tres file"),
+        ("res://weapons/shotgun", "must name a .tres file"),
+        ("res://weapons/.tres", "must name a .tres file"),
+        ("res://weapons/.shotgun.tres", "hidden files are ignored"),
+        (
+            "res://weapons/rifle.tres",
+            "already exists; gdkit never overwrites",
+        ),
+        (
+            "res://armor/vest.tres",
+            "res://armor does not exist; create the directory first",
+        ),
+        (
+            "res://notes.txt/vest.tres",
+            "res://notes.txt is not a directory",
+        ),
+    ];
+    #[cfg(unix)]
+    cases.push(("res://linked/vest.tres", "res://linked is a symlink"));
+    for (path, expected) in cases {
+        let error = resource::check_destination(&workspace, &out(path))
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with(&format!("--out {path}: ")), "{error}");
+        assert!(error.contains(expected), "{path}: {error}");
+    }
+    assert!(
+        !dir.path().join("armor").exists(),
+        "no directory is created"
+    );
+}
+
+#[test]
+fn references_must_exist_in_the_project() {
+    let (_dir, workspace) = project(&[("weapon.gd", ""), ("icon.png", "")]);
+    let spec = |value: Value| CreateSpec::from_json(&value).unwrap();
+    resource::check_references(
+        &workspace,
+        &spec(json!({"script": "res://weapon.gd", "properties": {"icon": {"$ref": "res://icon.png"}}})),
+    )
+    .unwrap();
+    let error = resource::check_references(
+        &workspace,
+        &spec(json!({"script": "res://gone.gd", "properties": {
+            "icon": {"$ref": "res://icons/missing.png"},
+            "ammo": {"$resource": {"script": "res://gone.gd", "properties": {"sfx": {"$ref": "res://a.wav"}}}},
+        }})),
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(
+        error,
+        "the spec names files that do not exist: res://a.wav, res://gone.gd, res://icons/missing.png"
+    );
 }
 
 #[test]
