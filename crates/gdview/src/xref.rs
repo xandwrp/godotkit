@@ -31,6 +31,8 @@
 //! - `missing_preload_ext_resource_instance_and_uid_targets_are_reported`
 //! - `extends_path_and_class_name_references_are_checked`
 //! - `references_to_lists_every_inbound_reference_for_a_path`
+//! - `references_to_a_directory_cover_every_file_under_it`
+//! - `references_to_a_missing_path_find_what_a_move_left_behind`
 //! - `findings_are_sorted_by_location_and_deterministic`
 
 use serde::Serialize;
@@ -38,11 +40,12 @@ use serde::Serialize;
 use crate::declarations::ProjectDeclarations;
 use crate::files::FileQuery;
 use crate::project::Project;
-use crate::respath::{NodePath, ResPath};
+use crate::respath::{NodePath, ResPath, Uid};
 use crate::scene::SceneFile;
 use crate::uid::UidMap;
 
 mod analysis;
+mod references;
 
 /// Everything `xref` needs, loaded once by the caller so `check` and `refs` share it.
 pub struct ProjectGraph<'a> {
@@ -148,6 +151,7 @@ pub enum FindingKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct Location {
+    #[serde(rename = "resource")]
     pub path: ResPath,
     pub line: usize,
 }
@@ -157,30 +161,117 @@ pub fn analyze(graph: &ProjectGraph<'_>) -> Vec<Finding> {
     analysis::run(graph)
 }
 
-/// Every place `path` is referenced: scenes (ext_resource, instance, script),
-/// scripts (preload/load/extends), `project.godot` (autoloads, main scene).
+/// One place a file is referenced from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Reference {
+    /// Serialized flat as `resource` and `line`, like every gdkit report.
+    #[serde(flatten)]
     pub at: Location,
     pub kind: ReferenceKind,
-    /// Node path inside the scene, when the reference is a node's script or instance.
+    /// The file referenced. Differs from the query when the query is a directory.
+    pub target: ResPath,
+    /// Node path inside the scene, when the reference is a node's script, instance, or property.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<NodePath>,
+    /// The property named, for [`ReferenceKind::Property`], or the
+    /// `section/key` in project.godot. The location of a property is its
+    /// node's or sub-resource's header line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Resolved through a `uid://`, so it keeps working after a move as long as
+    /// the file's uid moves with it (its `.uid` sidecar, `.import` file, or
+    /// resource header). A reference by path alone breaks.
+    pub by_uid: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReferenceKind {
+    /// An `[ext_resource]` line in a `.tscn`/`.tres`: the line a move rewrites.
     ExtResource,
-    Instance,
+    /// A node's `script` in a scene, or a resource's, through an ext_resource.
     Script,
+    /// A node that instances the scene, through an ext_resource.
+    Instance,
+    /// The scene's root instances it: the scene inherits from it.
+    Inherits,
+    /// `instance_placeholder="res://…"` on a node.
+    Placeholder,
+    /// A string property value in a scene or resource.
+    Property,
     Preload,
     Load,
     Extends,
+    /// Any other `res://` or `uid://` string literal in a script.
+    String,
     Autoload,
     MainScene,
-    Uid,
+    /// Any other project.godot value naming it, such as the icon, a theme,
+    /// a bus layout, a translation, or an enabled plugin.
+    ProjectSetting,
 }
 
-pub fn references_to(graph: &ProjectGraph<'_>, path: &ResPath) -> Vec<Reference> {
-    todo!()
+/// Every place `path`, or with a directory any file under it, is referenced:
+/// scenes and resources (ext_resource, script, instance, placeholder, string
+/// properties), scripts (extends, preload, load, other path strings), and
+/// `project.godot` (autoloads, main scene, other settings). `path` need not
+/// exist, so references left behind by a move are still found. Sorted by
+/// location, then kind.
+pub fn references_to(graph: &ProjectGraph<'_>, path: &ResPath) -> crate::Result<Vec<Reference>> {
+    references::find(graph, path)
+}
+
+/// What `gdkit refs` reports: the references, and what a move of the file has
+/// to carry along with it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Refs {
+    pub path: ResPath,
+    pub exists: bool,
+    pub directory: bool,
+    /// The file's own uid, which references `by_uid` resolve through.
+    pub uid: Option<Uid>,
+    /// `.uid` and `.import` files next to it that hold that uid and must move with it.
+    pub sidecars: Vec<ResPath>,
+    /// The script's `class_name`. Uses by that name are not listed: they follow
+    /// a move, but not a deletion.
+    pub class_name: Option<String>,
+    pub references: Vec<Reference>,
+    /// When `path` does not exist: where it may have moved.
+    pub suggestions: Vec<String>,
+}
+
+pub fn refs(graph: &ProjectGraph<'_>, path: &ResPath) -> crate::Result<Refs> {
+    let project = graph.project;
+    let exists = project.exists(path);
+    let directory = project.globalize(path).is_dir();
+    let sidecars = match directory {
+        true => Vec::new(),
+        false => ["uid", "import"]
+            .into_iter()
+            .filter_map(|extension| {
+                let parent = path.parent()?;
+                parent
+                    .join(&format!("{}.{extension}", path.file_name()))
+                    .ok()
+            })
+            .filter(|sidecar| project.exists(sidecar))
+            .collect(),
+    };
+    Ok(Refs {
+        path: path.clone(),
+        exists,
+        directory,
+        uid: graph.uids.uid_of(path).cloned(),
+        sidecars,
+        class_name: graph
+            .declarations
+            .by_path(path)
+            .and_then(|script| script.class_name.as_ref())
+            .map(|named| named.name.clone()),
+        references: references_to(graph, path)?,
+        suggestions: match exists {
+            true => Vec::new(),
+            false => graph.suggest_files(path),
+        },
+    })
 }

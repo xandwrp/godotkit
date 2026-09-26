@@ -41,6 +41,8 @@ pub struct SceneFile {
     pub editable_instances: Vec<NodePath>,
     /// `[resource]` block for `.tres`.
     pub resource: Option<Properties>,
+    /// Line of the `[resource]` header.
+    pub resource_line: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -170,6 +172,11 @@ impl Value {
 /// Parses a `.tscn` or `.tres` text.
 pub fn parse(source: &str) -> crate::Result<SceneFile> {
     text::parse(source)
+}
+
+/// Parses one value in the same variant text format, e.g. a `project.godot` value.
+pub fn parse_value(source: &str) -> crate::Result<Value> {
+    text::value(source)
 }
 
 impl SceneFile {

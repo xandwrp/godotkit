@@ -122,6 +122,37 @@ fn indexes_class_name_extends_and_members_with_line_numbers() {
 }
 
 #[test]
+fn res_and_uid_string_literals_are_resource_uses_once() {
+    let source = r#"extends "res://base.gd"
+
+const LEVEL := "res://levels/one.tscn"
+const SAVE_DIR = "user://saves"
+const NAME = "resolution"
+
+func _ready() -> void:
+	var scene = preload("res://ui/hud.tscn")
+	get_tree().change_scene_to_file("uid://c4x8")
+	var icon = load('res://icon.svg')
+"#;
+    let indexed = index_script(res("res://main.gd"), source);
+    let uses: Vec<_> = indexed
+        .resource_uses
+        .iter()
+        .map(|u| (u.kind, u.path.as_str(), u.line))
+        .collect();
+    assert_eq!(
+        uses,
+        [
+            (ResourceUseKind::Extends, "res://base.gd", 1),
+            (ResourceUseKind::String, "res://levels/one.tscn", 3),
+            (ResourceUseKind::Preload, "res://ui/hud.tscn", 8),
+            (ResourceUseKind::String, "uid://c4x8", 9),
+            (ResourceUseKind::Load, "res://icon.svg", 10),
+        ]
+    );
+}
+
+#[test]
 fn records_annotations_per_member_including_rpc_arguments() {
     let decl = index_script(res("res://player.gd"), PLAYER).declaration;
     let health = decl.members.iter().find(|m| m.name == "health").unwrap();

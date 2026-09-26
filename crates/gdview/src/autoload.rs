@@ -1,13 +1,12 @@
 //! Autoload declarations in initialization order.
 //!
 //! # Tests (tests/settings.rs covers parsing; tests/autoload.rs)
-//! - `display_lists_zero_based_order_kind_and_path`
+//! - `resolve_lists_zero_based_order_kind_and_path`
 //! - `scripts_vs_scenes_are_distinguished_by_extension`
-
-use std::fmt;
 
 use serde::Serialize;
 
+use crate::project::Project;
 use crate::respath::{ResPath, Uid};
 use crate::uid::UidMap;
 
@@ -49,8 +48,78 @@ impl Autoloads {
     }
 }
 
-impl fmt::Display for Autoloads {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+impl Autoloads {
+    /// Each autoload with its load order, file, and kind, `uid://`s resolved.
+    pub fn resolve(&self, project: &Project, uids: &UidMap) -> Vec<ResolvedAutoload> {
+        self.iter()
+            .enumerate()
+            .map(|(order, autoload)| {
+                let path = autoload.path(uids).cloned();
+                let kind = match &path {
+                    None => AutoloadKind::Unresolved,
+                    Some(path) => AutoloadKind::of(path),
+                };
+                ResolvedAutoload {
+                    order,
+                    name: autoload.name.clone(),
+                    singleton: autoload.singleton,
+                    kind,
+                    exists: path.as_ref().is_some_and(|path| project.exists(path)),
+                    uid: match &autoload.target {
+                        AutoloadTarget::Uid(uid) => Some(uid.clone()),
+                        AutoloadTarget::Path(_) => None,
+                    },
+                    path,
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ResolvedAutoload {
+    /// Zero-based. Godot adds autoloads to the tree, and runs their `_init`/`_ready`, in this order.
+    pub order: usize,
+    pub name: String,
+    /// Reachable by name from every script.
+    pub singleton: bool,
+    pub kind: AutoloadKind,
+    /// The file it loads; `None` when its `uid://` resolves to no file.
+    pub path: Option<ResPath>,
+    /// As written in project.godot, when it names a uid.
+    pub uid: Option<Uid>,
+    pub exists: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoloadKind {
+    /// `.gd` or `.cs`: Godot instances a `Node` with the script attached.
+    Script,
+    /// `.tscn` or `.scn`: Godot instances the scene.
+    Scene,
+    /// Any other extension, such as a script in a language an extension adds.
+    Other,
+    /// A `uid://` that no project file claims.
+    Unresolved,
+}
+
+impl AutoloadKind {
+    /// By extension, case-insensitively, as the engine decides.
+    pub fn of(path: &ResPath) -> Self {
+        match path.extension().map(str::to_ascii_lowercase).as_deref() {
+            Some("gd" | "cs") => Self::Script,
+            Some("tscn" | "scn") => Self::Scene,
+            _ => Self::Other,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Script => "script",
+            Self::Scene => "scene",
+            Self::Other => "other",
+            Self::Unresolved => "unresolved",
+        }
     }
 }

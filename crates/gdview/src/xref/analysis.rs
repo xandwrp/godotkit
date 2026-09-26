@@ -278,6 +278,10 @@ impl<'g> Analysis<'g, '_> {
     fn script_references(&self, script: &IndexedScript, findings: &mut Vec<Finding>) {
         let path = &script.declaration.path;
         for used in &script.resource_uses {
+            if used.kind == ResourceUseKind::String {
+                // May name a directory, a format, or a file made at runtime.
+                continue;
+            }
             let at = Location {
                 path: path.clone(),
                 line: used.line,
@@ -290,6 +294,7 @@ impl<'g> Analysis<'g, '_> {
                 ResourceUseKind::Extends => "extends",
                 ResourceUseKind::Preload => "preload",
                 ResourceUseKind::Load => "load",
+                ResourceUseKind::String => unreachable!("skipped above"),
             };
             if used.path.starts_with("uid://") {
                 if self.graph.uids.resolve(&Uid(used.path.clone())).is_none() {
@@ -756,22 +761,24 @@ impl<'g> Analysis<'g, '_> {
 
     // ---- suggestions ---------------------------------------------------------
 
-    /// Files with the same name elsewhere (a move), then close names in the same directory (a rename).
     fn suggest_files(&self, missing: &ResPath) -> Vec<String> {
+        self.graph.suggest_files(missing)
+    }
+}
+
+impl ProjectGraph<'_> {
+    /// Files with the same name elsewhere (a move), then close names in the
+    /// same directory (a rename). At most three.
+    pub fn suggest_files(&self, missing: &ResPath) -> Vec<String> {
         let name = missing.file_name();
         let mut suggestions: Vec<String> = self
-            .graph
             .files
             .iter()
             .filter(|file| file.file_name() == name)
             .map(ToString::to_string)
             .collect();
         let parent = missing.parent();
-        let siblings = self
-            .graph
-            .files
-            .iter()
-            .filter(|file| file.parent() == parent);
+        let siblings = self.files.iter().filter(|file| file.parent() == parent);
         let close = similar(name, siblings.map(|file| file.file_name()));
         suggestions.extend(
             close
@@ -801,7 +808,7 @@ fn normalized(path: NodePath) -> NodePath {
 /// A path as a script spells it: `res://…`, or relative to the script's directory.
 /// `None` for anything that is not a project path (`user://`, absolute OS paths,
 /// relative paths that climb out of the project).
-fn resolve_script_path(script: &ResPath, written: &str) -> Option<ResPath> {
+pub(super) fn resolve_script_path(script: &ResPath, written: &str) -> Option<ResPath> {
     if written.starts_with("res://") {
         return normalize_res(written.strip_prefix("res://")?);
     }
