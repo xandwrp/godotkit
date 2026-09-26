@@ -526,6 +526,116 @@ fn default_harnesses_require_exact_arguments_and_valid_editor_extension_file() {
 }
 
 #[test]
+fn resource_harnesses_validate_arguments_echo_the_spec_and_write_the_staged_file() {
+    let fake = Fake::new(json!({}));
+    for args in [
+        vec![],
+        vec!["class"],
+        vec!["kind", "Resource"],
+        vec!["class", "Resource", "extra"],
+    ] {
+        assert_input_error(
+            &fake.harness("resource_schema.gd", &args),
+            "arguments",
+            None,
+        );
+    }
+    for args in [vec!["class", "Resource"], vec!["script", "res://weapon.gd"]] {
+        let schema = fake.harness("resource_schema.gd", &args);
+        assert!(schema.success());
+        assert_eq!(envelope(&schema).payload, Some(json!({"properties": []})));
+    }
+
+    let staged = fake.dir.path().join(".x.tres");
+    for args in [
+        vec![],
+        vec!["spec.json"],
+        vec!["spec.json", "res://.x.tres", "extra"],
+    ] {
+        assert_input_error(
+            &fake.harness("resource_create.gd", &args),
+            "arguments",
+            None,
+        );
+    }
+    for text in [None, Some("not json"), Some("[]")] {
+        if let Some(text) = text {
+            fs::write(fake.dir.path().join("spec.json"), text).unwrap();
+        }
+        assert_input_error(
+            &fake.harness("resource_create.gd", &["spec.json", "res://.x.tres"]),
+            "spec",
+            Some("spec.json"),
+        );
+    }
+    assert!(!staged.exists(), "a rejected spec must not be saved");
+
+    let spec = fake.dir.path().join("spec.json");
+    let properties =
+        json!({"damage": 3, "offset": {"$variant": {"type": "Vector3", "value": [1, 2, 3]}}});
+    fs::write(
+        &spec,
+        json!({"class": "Resource", "properties": properties}).to_string(),
+    )
+    .unwrap();
+    let create = fake.harness(
+        "resource_create.gd",
+        &[spec.to_str().unwrap(), "res://.x.tres"],
+    );
+    assert!(create.success(), "{}", stderr(&create));
+    assert_eq!(envelope(&create).payload, Some(json!({"echo": properties})));
+    assert_eq!(
+        fs::read_to_string(&staged).unwrap(),
+        "[gd_resource type=\"Resource\" format=3]\n\n[resource]\n"
+    );
+
+    fs::remove_file(&staged).unwrap();
+    fs::write(&spec, json!({"class": "Resource"}).to_string()).unwrap();
+    let create = fake.harness("resource_create.gd", &["res://spec.json", "res://.x.tres"]);
+    assert_eq!(envelope(&create).payload, Some(json!({"echo": {}})));
+}
+
+#[test]
+fn resource_create_staged_override_survives_failures_and_a_missing_directory_saves_nothing() {
+    let fake = Fake::new(json!({"resource_create": {
+        "mode": "error_envelope",
+        "staged": "partial",
+        "payload": {"stage": "verify", "message": "echo differs", "field": "properties.offset"},
+    }}));
+    fs::write(fake.dir.path().join("spec.json"), "{}").unwrap();
+    let create = fake.harness("resource_create.gd", &["spec.json", "res://.x.tres"]);
+    assert_eq!(create.status.unwrap().code(), Some(1));
+    let error = envelope(&create).error.unwrap();
+    assert_eq!(
+        (error.stage.as_str(), error.field.as_deref()),
+        ("verify", Some("properties.offset"))
+    );
+    assert_eq!(
+        fs::read_to_string(fake.dir.path().join(".x.tres")).unwrap(),
+        "partial"
+    );
+
+    let fake = Fake::new(json!({"resource_create": {"staged": "text"}}));
+    fs::write(fake.dir.path().join("spec.json"), "{}").unwrap();
+    let create = fake.harness(
+        "resource_create.gd",
+        &["spec.json", "res://missing/.x.tres"],
+    );
+    assert_eq!(create.status.unwrap().code(), Some(1));
+    let error = envelope(&create).error.unwrap();
+    assert_eq!(
+        (error.stage.as_str(), error.field.as_deref()),
+        ("save", Some("res://missing/.x.tres"))
+    );
+    assert!(!fake.dir.path().join("missing").exists());
+
+    let fake = Fake::new(json!({"probe": {"staged": "text"}}));
+    let probe = fake.harness("probe.gd", &[]);
+    assert_eq!(probe.status.unwrap().code(), Some(2));
+    assert!(stderr(&probe).contains("`staged` applies only to resource_create"));
+}
+
+#[test]
 fn normal_import_generates_deterministic_fixture_cache_only_in_path() {
     let fake = Fake::new(json!({}));
     let project = fake.dir.path().join("disposable copy");

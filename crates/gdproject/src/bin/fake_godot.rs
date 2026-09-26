@@ -6,6 +6,7 @@
 //! tests copy the executable per test, and an inherited variable must never
 //! change what a test observes.
 //! Keys are `help`, `probe`, `--import`, `import_scan`, `check`,
+//! `resource_schema`, `resource_create`,
 //! `--dump-extension-api-with-docs`, `--doctool`, `--gdscript-docs` (a
 //! `--doctool` run that also has `--gdscript-docs`), and
 //! `script_bootstrap:<res://path>`, with fallback to `script_bootstrap`.
@@ -24,6 +25,11 @@
 //!   `import_scan` to `<--path>/.godot/global_script_class_cache.cfg`.
 //! - `files`: `{relative path: contents}` written by a normal dump or doctool
 //!   run into its output directory, replacing the defaults below.
+//! - `staged` (`resource_create` only): exact text written to the staged path
+//!   (the second user argument) before any output, in every mode, so a save
+//!   that precedes a later failure can be simulated. Without it, only `envelope`
+//!   mode writes the staged file, as a minimal `.tres`, and only once the
+//!   arguments and spec are valid.
 //!
 //! Dump and doctool (`envelope` mode, no envelope printed): the dump writes
 //! `extension_api.json` into the working directory, by default a minimal valid
@@ -54,6 +60,10 @@
 //! Only manifest paths whose case-insensitive final extension is in that union
 //! count: `.gd` = scripts, `.tscn`/`.scn` = scenes, all other eligible paths =
 //! resources. Duplicates count separately; missing files remain eligible.
+//! ResourceSchema takes exactly `class <Name>` or `script <res://path>`; its
+//! payload is {"properties":[]}. ResourceCreate takes exactly a spec filename
+//! (a JSON object) and the staged `res://` path; its payload is
+//! {"echo": <the spec's "properties", or {}>}, echoing the spec verbatim.
 //!
 //! Deterministic fake runtime set: gd, gdshader, gdshaderinc, json, res, scn,
 //! tres, tscn. Fake editor set: the runtime set plus bmp, png, svg. These lists
@@ -87,6 +97,9 @@
 //!   otherwise a `resource` error envelope, exit 1.
 //! - `import_scan` requires `--editor` before `--`: otherwise an `editor` error
 //!   envelope, exit 2 (after default argument/manifest validation, as in Godot).
+//! - `resource_create` requires the staged path's directory to exist:
+//!   otherwise a `save` error envelope naming the staged path in `field`,
+//!   exit 1, and nothing is written.
 //! - `script_bootstrap` requires exactly one user argument: otherwise an
 //!   `arguments` error envelope, exit 2, with no startup marker or configured
 //!   output.
@@ -144,9 +157,12 @@ struct Scenario {
     payload: Option<Value>,
     class_cache: Option<String>,
     files: Option<BTreeMap<String, String>>,
+    staged: Option<String>,
 }
 
 const DEFAULT_DUMP: &str = r#"{"header":{"version_major":4,"version_minor":7,"version_patch":2,"version_status":"stable","version_build":"fake","version_full_name":"Godot Engine v4.7.2.stable.fake","precision":"single"},"global_constants":[],"global_enums":[],"utility_functions":[],"builtin_classes":[],"classes":[],"singletons":[]}"#;
+
+const DEFAULT_STAGED: &str = "[gd_resource type=\"Resource\" format=3]\n\n[resource]\n";
 
 const DEFAULT_GDSCRIPT_DOC: &str = r#"<?xml version="1.0" encoding="UTF-8" ?>
 <class name="@GDScript">
@@ -275,6 +291,34 @@ fn default_payload(
     if harness == "probe" {
         return Ok(json!({"version": "4.7.2.stable.fake", "major": 4, "editor": true}));
     }
+    if harness == "resource_schema" {
+        return match user_args {
+            [kind, _] if kind == "class" || kind == "script" => Ok(json!({"properties": []})),
+            _ => Err(input_error(
+                "arguments",
+                None,
+                "Expected `class <Name>` or `script <res://path>`",
+            )),
+        };
+    }
+    if harness == "resource_create" {
+        let [spec, _] = user_args else {
+            return Err(input_error(
+                "arguments",
+                None,
+                "Expected spec path and staged res:// path",
+            ));
+        };
+        let bytes = fs::read(resource_file(project, spec))
+            .map_err(|error| input_error("spec", Some(spec), error))?;
+        let spec_value: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| input_error("spec", Some(spec), error))?;
+        let Value::Object(mut object) = spec_value else {
+            return Err(input_error("spec", Some(spec), "Spec is not a JSON object"));
+        };
+        let echo = object.remove("properties").unwrap_or_else(|| json!({}));
+        return Ok(json!({"echo": echo}));
+    }
     if (harness == "import_scan" && user_args.len() != 1)
         || (harness == "check"
             && (user_args.len() != 3
@@ -354,8 +398,25 @@ fn invocation_contract(
     harness: &str,
     flags: &[String],
     project: &Path,
+    user_args: &[String],
 ) -> std::result::Result<(), (HarnessError, u8)> {
     match harness {
+        "resource_create"
+            if user_args.get(1).is_some_and(|staged| {
+                !resource_file(project, staged)
+                    .parent()
+                    .is_some_and(Path::is_dir)
+            }) =>
+        {
+            Err((
+                input_error(
+                    "save",
+                    user_args.get(1).map(String::as_str),
+                    "Cannot save resource: directory does not exist",
+                ),
+                1,
+            ))
+        }
         "probe"
             if !["project.godot", "probe.tres"]
                 .iter()
@@ -535,7 +596,10 @@ fn run() -> Result<u8> {
         }
     } else {
         match script {
-            Some(name @ ("probe" | "import_scan" | "check" | "script_bootstrap")) => name,
+            Some(
+                name @ ("probe" | "import_scan" | "check" | "resource_schema"
+                | "resource_create" | "script_bootstrap"),
+            ) => name,
             _ => return Err("unsupported invocation (expected --help, --import, a dump, --doctool, or a supported --script harness)".into()),
         }
     };
@@ -553,6 +617,8 @@ fn run() -> Result<u8> {
                 | "--import"
                 | "import_scan"
                 | "check"
+                | "resource_schema"
+                | "resource_create"
                 | "script_bootstrap"
                 | "--dump-extension-api-with-docs"
                 | "--doctool"
@@ -577,7 +643,20 @@ fn run() -> Result<u8> {
     if mode == Mode::Crash && scenario.exit == Some(0) {
         return Err("crash requires a nonzero exit".into());
     }
+    if scenario.staged.is_some() && harness != "resource_create" {
+        return Err("`staged` applies only to resource_create".into());
+    }
     let project = Path::new(option(flags, "--path").unwrap_or("."));
+    let contract = invocation_contract(harness, flags, project, user_args);
+    let staged = match user_args {
+        [_, staged] if harness == "resource_create" && contract.is_ok() => {
+            Some(resource_file(project, staged))
+        }
+        _ => None,
+    };
+    if let (Some(path), Some(text)) = (&staged, &scenario.staged) {
+        fs::write(path, text)?;
+    }
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
     if harness == "script_bootstrap" && matches!(mode, Mode::Envelope | Mode::Hang) {
@@ -648,7 +727,6 @@ fn run() -> Result<u8> {
             write_outputs(Path::new(directory), scenario.files.as_ref(), defaults)?;
         }
         Mode::Envelope => {
-            let contract = invocation_contract(harness, flags, project);
             // Without --editor there is no editor filesystem scan to write a cache.
             if harness == "--import" || (harness == "import_scan" && contract.is_ok()) {
                 if option(flags, "--path").is_none() {
@@ -656,13 +734,21 @@ fn run() -> Result<u8> {
                 }
                 write_cache(project, scenario.class_cache.as_deref())?;
             }
-            if matches!(harness, "probe" | "import_scan" | "check") {
+            if matches!(
+                harness,
+                "probe" | "import_scan" | "check" | "resource_schema" | "resource_create"
+            ) {
                 let payload = match scenario.payload {
                     Some(value) => Ok(value),
                     None => default_payload(harness, project, user_args),
                 };
                 let (payload, error) = match (payload, contract) {
-                    (Ok(payload), Ok(())) => (Some(payload), None),
+                    (Ok(payload), Ok(())) => {
+                        if let (Some(path), None) = (&staged, &scenario.staged) {
+                            fs::write(path, DEFAULT_STAGED)?;
+                        }
+                        (Some(payload), None)
+                    }
                     (Ok(_), Err((error, exit))) => {
                         emit_envelope(&mut stdout, harness, None, Some(error))?;
                         stdout.flush()?;
