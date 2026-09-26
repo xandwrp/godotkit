@@ -11,6 +11,10 @@
 //! - `unparseable_scripts_are_reported_not_skipped`
 //! - `index_project_uses_file_query_and_is_sorted_by_path`
 //! - `by_class_name_detects_duplicate_declarations`
+//! - `rpc_config_enforces_categories_and_channel_position`
+//! - `rpc_config_preserves_signed_channels_and_decodes_string_literals`
+//! - `rpc_config_keeps_unresolved_expressions_explicit`
+//! - `rpc_annotation_errors_survive_indexing_including_inner_classes`
 
 use std::collections::BTreeMap;
 
@@ -21,6 +25,7 @@ use crate::project::Project;
 use crate::respath::ResPath;
 
 mod index;
+mod rpc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ScriptDeclaration {
@@ -59,8 +64,12 @@ pub struct MemberDeclaration {
     pub is_private: bool,
     pub type_text: Option<String>,
     pub annotations: Vec<AnnotationDeclaration>,
-    /// Parsed from `@rpc(...)` when present.
+    /// Parsed from a literal `@rpc(...)` when present and understood.
     pub rpc: Option<RpcConfig>,
+    /// Invalid or statically unresolved RPC annotation. This is not a syntax
+    /// error: the original annotation arguments remain available to consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_error: Option<String>,
     /// Parameters, when `kind` is `Func` or `Signal`.
     pub parameters: Vec<ParameterDeclaration>,
 }
@@ -114,13 +123,16 @@ pub struct AnnotationDeclaration {
     pub arguments: Vec<String>,
 }
 
-/// `@rpc` as Godot interprets it. Defaults are Godot's: authority, call_remote, unreliable, channel 0.
+/// Source RPC configuration, not a guarantee that a transport accepts it.
+/// Defaults are Godot's: authority, call_remote, unreliable, channel 0.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RpcConfig {
     pub mode: RpcMode,
     pub call_local: bool,
     pub transfer: TransferMode,
-    pub channel: u32,
+    /// Signed because Godot preserves negative annotation channels; transport
+    /// constraints are not validated by this source index.
+    pub channel: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -136,36 +148,6 @@ pub enum TransferMode {
     Unreliable,
     UnreliableOrdered,
     Reliable,
-}
-
-impl RpcConfig {
-    /// Parses `@rpc` argument texts, quoted or not. Unknown arguments are an
-    /// error, not ignored. A later argument of the same kind wins, as in Godot.
-    pub fn from_arguments(arguments: &[&str]) -> Result<Self, String> {
-        let mut config = RpcConfig {
-            mode: RpcMode::Authority,
-            call_local: false,
-            transfer: TransferMode::Unreliable,
-            channel: 0,
-        };
-        for argument in arguments {
-            let text = argument.trim().trim_matches(|c| c == '"' || c == '\'');
-            match text {
-                "authority" => config.mode = RpcMode::Authority,
-                "any_peer" => config.mode = RpcMode::AnyPeer,
-                "call_remote" => config.call_local = false,
-                "call_local" => config.call_local = true,
-                "unreliable" => config.transfer = TransferMode::Unreliable,
-                "unreliable_ordered" => config.transfer = TransferMode::UnreliableOrdered,
-                "reliable" => config.transfer = TransferMode::Reliable,
-                _ => match text.parse() {
-                    Ok(channel) => config.channel = channel,
-                    Err(_) => return Err(format!("unknown @rpc argument {argument}")),
-                },
-            }
-        }
-        Ok(config)
-    }
 }
 
 /// Indexes one script from source. Never fails: an unparseable script yields a
