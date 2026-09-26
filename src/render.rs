@@ -39,3 +39,11 @@ impl From<Exit> for std::process::ExitCode {
         }
     }
 }
+
+/// [`emit`], with a failed write as a tool error.
+pub fn write<T: Serialize + Human>(output: Output, report: &T) -> gdproject::Result<()> {
+    emit(output, report).map_err(|source| gdproject::Error::Io {
+        path: "<stdout>".into(),
+        source,
+    })
+}

@@ -8,8 +8,9 @@
 //! The crate is layered bottom-up. Lower modules never import higher ones.
 //!
 //! ```text
-//! respath, settings, similar, syntax, variant, api (pure: bytes/str in, data out)
-//!   └─ files, autoload, scene, declarations, uid   (need a Project or a parsed file)
+//! respath, similar, syntax, variant, api, scene    (pure: bytes/str in, data out)
+//!   └─ settings, files, autoload, declarations, uid (need a Project or a parsed file;
+//!                                                    settings reads values with scene's grammar)
 //!        └─ xref, net                              (cross-file analysis over the above)
 //! ```
 //!

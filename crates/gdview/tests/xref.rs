@@ -2,10 +2,10 @@
 
 use std::fs;
 
-use gdview::Project;
 use gdview::declarations::index_project;
 use gdview::uid::UidMap;
-use gdview::xref::{Finding, FindingKind, ProjectGraph, analyze};
+use gdview::xref::{Finding, FindingKind, ProjectGraph, ReferenceKind, analyze, references_to};
+use gdview::{Project, ResPath};
 
 /// Writes a project and returns every finding, as `(kind, "path:line", target)`.
 fn findings(files: &[(&str, &str)]) -> Vec<Finding> {
@@ -443,10 +443,250 @@ fn duplicate_uids_and_unparseable_scenes_are_reported() {
     );
 }
 
+/// A project that references `res://player/` in every way gdview knows.
+const REFERENCING: &[(&str, &str)] = &[
+    (
+        "project.godot",
+        "config_version=5\n\n[application]\n\nrun/main_scene=\"uid://l3v3l\"\nconfig/icon=\"res://icon.svg\"\n\n[autoload]\n\nPlayerState=\"*res://player/player.gd\"\n\n[editor_plugins]\n\nenabled=PackedStringArray(\"res://addons/tool/plugin.cfg\", \"res://player/plugin.cfg\")\n",
+    ),
+    ("icon.svg", "<svg/>"),
+    ("player/player.gd", "extends CharacterBody2D\n"),
+    ("player/player.gd.uid", "uid://pl4y3r\n"),
+    ("player/plugin.cfg", "[plugin]\n"),
+    (
+        "player/player.tscn",
+        "[gd_scene format=3 uid=\"uid://sc3n3\"]\n\n[ext_resource type=\"Script\" uid=\"uid://pl4y3r\" path=\"res://player/old_name.gd\" id=\"1_p\"]\n\n[node name=\"Player\" type=\"CharacterBody2D\"]\nscript = ExtResource(\"1_p\")\n",
+    ),
+    (
+        "level.tscn",
+        "[gd_scene format=3 uid=\"uid://l3v3l\"]\n\n[ext_resource type=\"PackedScene\" path=\"res://player/player.tscn\" id=\"1_s\"]\n\n[node name=\"Level\" type=\"Node2D\"]\nnext = \"res://player/player.tscn\"\n\n[node name=\"Player\" parent=\".\" instance=ExtResource(\"1_s\")]\n\n[node name=\"Later\" parent=\".\" instance_placeholder=\"res://player/player.tscn\"]\n",
+    ),
+    (
+        "boss.tscn",
+        "[gd_scene format=3]\n\n[ext_resource type=\"PackedScene\" uid=\"uid://sc3n3\" path=\"res://player/player.tscn\" id=\"1_b\"]\n\n[node name=\"Boss\" instance=ExtResource(\"1_b\")]\n",
+    ),
+    (
+        "stats.tres",
+        "[gd_resource type=\"Resource\" script_class=\"Stats\" format=3]\n\n[ext_resource type=\"Script\" path=\"res://player/player.gd\" id=\"1_s\"]\n\n[sub_resource type=\"Resource\" id=\"Resource_a\"]\nicon_path = \"res://icon.svg\"\n\n[resource]\nscript = ExtResource(\"1_s\")\nscenes = [\"res://player/player.tscn\", \"uid://pl4y3r\"]\n",
+    ),
+    (
+        "main.gd",
+        "extends \"res://player/player.gd\"\n\nconst HERO := \"uid://sc3n3\"\nconst HUD := \"res://hud.tscn\"\n\nfunc _ready():\n\tvar p = preload(\"res://player/player.tscn\")\n\tvar s = load(\"player/player.gd\")\n",
+    ),
+];
+
+type Row = (
+    String,
+    ReferenceKind,
+    String,
+    Option<String>,
+    Option<String>,
+    bool,
+);
+
+/// Writes `files` and returns the references to `query` as
+/// `("path:line", kind, target, node, key, by_uid)`.
+fn references(files: &[(&str, &str)], query: &str) -> Vec<Row> {
+    let dir = tempfile::tempdir().unwrap();
+    for (path, contents) in files {
+        let path = dir.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    let project = Project::open(dir.path()).unwrap();
+    let declarations = index_project(&project).unwrap();
+    let uids = UidMap::build(&project).unwrap();
+    let graph = ProjectGraph::load(&project, &declarations, &uids).unwrap();
+    references_to(&graph, &ResPath::parse(query).unwrap())
+        .unwrap()
+        .into_iter()
+        .map(|r| {
+            (
+                format!("{}:{}", r.at.path.relative(), r.at.line),
+                r.kind,
+                r.target.relative().to_owned(),
+                r.node.map(|n| n.0),
+                r.key,
+                r.by_uid,
+            )
+        })
+        .collect()
+}
+
+fn row(
+    at: &str,
+    kind: ReferenceKind,
+    target: &str,
+    node: Option<&str>,
+    key: Option<&str>,
+    by_uid: bool,
+) -> Row {
+    (
+        at.into(),
+        kind,
+        target.into(),
+        node.map(Into::into),
+        key.map(Into::into),
+        by_uid,
+    )
+}
+
 #[test]
-#[ignore = "scaffold: lands with `gdkit refs`"]
 fn references_to_lists_every_inbound_reference_for_a_path() {
-    todo!()
+    use ReferenceKind::*;
+    let script = "player/player.gd";
+    assert_eq!(
+        references(REFERENCING, "res://player/player.gd"),
+        [
+            row("main.gd:1", Extends, script, None, None, false),
+            row("main.gd:8", Load, script, None, None, false),
+            row(
+                "player/player.tscn:3",
+                ExtResource,
+                script,
+                None,
+                None,
+                true
+            ),
+            row(
+                "player/player.tscn:5",
+                Script,
+                script,
+                Some("."),
+                None,
+                true
+            ),
+            row(
+                "project.godot:10",
+                Autoload,
+                script,
+                None,
+                Some("autoload/PlayerState"),
+                false
+            ),
+            row("stats.tres:3", ExtResource, script, None, None, false),
+            row("stats.tres:8", Script, script, None, None, false),
+            row("stats.tres:8", Property, script, None, Some("scenes"), true),
+        ]
+    );
+    let scene = "player/player.tscn";
+    assert_eq!(
+        references(REFERENCING, "res://player/player.tscn"),
+        [
+            row("boss.tscn:3", ExtResource, scene, None, None, true),
+            row("boss.tscn:5", Inherits, scene, Some("."), None, true),
+            row("level.tscn:3", ExtResource, scene, None, None, false),
+            row(
+                "level.tscn:5",
+                Property,
+                scene,
+                Some("."),
+                Some("next"),
+                false
+            ),
+            row("level.tscn:8", Instance, scene, Some("Player"), None, false),
+            row(
+                "level.tscn:10",
+                Placeholder,
+                scene,
+                Some("Later"),
+                None,
+                false
+            ),
+            row("main.gd:3", String, scene, None, None, true),
+            row("main.gd:7", Preload, scene, None, None, false),
+            row("stats.tres:8", Property, scene, None, Some("scenes"), false),
+        ]
+    );
+    assert_eq!(
+        references(REFERENCING, "res://level.tscn"),
+        [row(
+            "project.godot:5",
+            MainScene,
+            "level.tscn",
+            None,
+            Some("application/run/main_scene"),
+            true
+        )]
+    );
+    assert_eq!(
+        references(REFERENCING, "res://icon.svg"),
+        [
+            row(
+                "project.godot:6",
+                ProjectSetting,
+                "icon.svg",
+                None,
+                Some("application/config/icon"),
+                false
+            ),
+            row(
+                "stats.tres:5",
+                Property,
+                "icon.svg",
+                None,
+                Some("icon_path"),
+                false
+            ),
+        ]
+    );
+    assert!(references(REFERENCING, "res://main.gd").is_empty());
+}
+
+#[test]
+fn references_to_a_directory_cover_every_file_under_it() {
+    let rows = references(REFERENCING, "res://player");
+    let targets: std::collections::BTreeSet<_> = rows.iter().map(|r| r.2.as_str()).collect();
+    assert_eq!(
+        targets.into_iter().collect::<Vec<_>>(),
+        [
+            "player/player.gd",
+            "player/player.tscn",
+            "player/plugin.cfg"
+        ]
+    );
+    assert_eq!(rows.len(), 8 + 9 + 1, "every reference to each file");
+    // `res://play` is not a directory prefix of `res://player/…`.
+    assert!(references(REFERENCING, "res://play").is_empty());
+}
+
+#[test]
+fn references_to_a_missing_path_find_what_a_move_left_behind() {
+    use ReferenceKind::*;
+    // enemy.gd moved to enemies/enemy.gd with its .uid sidecar; spawner.tscn
+    // still names the old path but carries the uid; wave.gd names only the path.
+    let files: &[(&str, &str)] = &[
+        ("project.godot", "config_version=5\n"),
+        ("enemies/enemy.gd", "extends Node\n"),
+        ("enemies/enemy.gd.uid", "uid://3n3my\n"),
+        (
+            "spawner.tscn",
+            "[gd_scene format=3]\n\n[ext_resource type=\"Script\" uid=\"uid://3n3my\" path=\"res://enemy.gd\" id=\"1\"]\n[ext_resource type=\"Script\" uid=\"uid://gone\" path=\"res://enemy.gd\" id=\"2\"]\n\n[node name=\"Spawner\" type=\"Node\"]\nscript = ExtResource(\"2\")\n",
+        ),
+        (
+            "wave.gd",
+            "extends Node\nconst E = preload(\"res://enemy.gd\")\n",
+        ),
+    ];
+    assert_eq!(
+        references(files, "res://enemy.gd"),
+        [
+            row("spawner.tscn:4", ExtResource, "enemy.gd", None, None, false),
+            row("spawner.tscn:6", Script, "enemy.gd", Some("."), None, false),
+            row("wave.gd:2", Preload, "enemy.gd", None, None, false),
+        ]
+    );
+    assert_eq!(
+        references(files, "res://enemies/enemy.gd"),
+        [row(
+            "spawner.tscn:3",
+            ExtResource,
+            "enemies/enemy.gd",
+            None,
+            None,
+            true
+        )]
+    );
 }
 
 #[test]

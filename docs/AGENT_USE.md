@@ -4,7 +4,7 @@ What an agent working in a Godot project with no editor open actually reaches
 for, in the order it reaches for it, and what it does with the answer. This is
 the priority list for implementation: if a command is not on this page, it can
 wait. `check` (including engine phases, slices, baselines, and project scripts),
-`api`, `init`, and `config` are implemented; the other workflows below describe the
+`api`, `refs`, `settings`, `autoloads`, `doctor`, `init`, and `config` are implemented; the other workflows below describe the
 intended surface, not a claim that all command scaffolds are complete. API-cache diagnostic enrichment
 for `check` remains deferred.
 
@@ -240,16 +240,42 @@ call site, and synchronizer that touches it.
 
 ```sh
 gdkit refs res://scripts/player.gd --output json     # before a rename or move
+gdkit refs res://scripts                             # a directory: everything under it
+gdkit refs res://scripts/old_name.gd                 # after a move: what still points at the old path
 gdkit settings input                                 # action names and their keys
 gdkit settings layers                                # named physics/render layers
+gdkit settings window
 gdkit settings main-scene
 gdkit settings get application config/name
+gdkit autoloads                                      # initialization order, kind, file
 ```
 
-Offline, instant. `refs` lists every scene, script, autoload, and `uid://` that
-points at a file, so a move or rename is done with the full list in hand rather
-than discovered by the next `check`. `settings input` is the answer to `"jump"`
-vs `"ui_accept"`; `settings layers` makes collision masks readable.
+Offline, instant. `refs` lists every place a file is referenced, with
+`resource` + `line` and a `kind`: `ext_resource` lines and the nodes whose
+`script`/`instance` use them (`inherits` for a scene's root), placeholders and
+string properties in scenes and resources; `extends`, `preload`, `load`, and
+any other `res://`/`uid://` string literal in scripts (`change_scene_to_file`
+targets, path constants); and `project.godot` autoloads, main scene, and other
+settings (icon, themes, bus layouts, translations, plugins). A move or rename is
+done with the full list in hand rather than discovered by the next `check`.
+
+`by_uid: true` marks a reference that resolves through the file's uid and keeps
+working after a move, as long as the uid moves too: `sidecars` lists the `.uid`
+and `.import` files to move with it. Everything else names the path and breaks.
+Uses by `class_name` follow a move and are not listed; `class_name` is reported
+so a deletion is not mistaken for safe. The path need not exist, so querying the
+old path after a move shows what was left behind; a missing path exits `1` with
+`suggestions`. It may be `res://`, `uid://`, or project-relative.
+
+`settings input` is the answer to `"jump"` vs `"ui_accept"`: the project's
+actions, then Godot's built-in `ui_*` actions (`builtin: true`; a project entry
+with a built-in's name replaces it, `in_project: true`). Keys, buttons, and axes
+are the GDScript constants (`KEY_SPACE`, `JOY_BUTTON_A`); `physical_keycode` is
+the key's position on a US layout. `settings layers` makes collision masks
+readable (human output shows each layer's mask value). `settings window` fills
+in Godot's defaults. `main-scene` resolves a `uid://`; it and `get` exit `1`
+when the value is unset, and `get` suggests close keys. A value a typed view
+cannot read is a tool error naming the key (exit `2`), never a silent default.
 
 ## Engine setup: `config` once per machine, `init` once per project
 

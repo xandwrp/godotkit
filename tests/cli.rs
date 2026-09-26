@@ -224,8 +224,150 @@ fn static_check_baseline_file_isolates_new_findings() {
 
 #[test]
 #[ignore = "scaffold"]
-fn scene_tree_autoloads_refs_settings_net_and_static_check_need_no_engine() {
+fn scene_tree_and_net_need_no_engine() {
     todo!()
+}
+
+const OFFLINE_PROJECT: &[(&str, &str)] = &[
+    (
+        "project.godot",
+        "config_version=5\n\n[application]\n\nconfig/name=\"Offline\"\nrun/main_scene=\"uid://m41n\"\n\n[autoload]\n\nGame=\"*uid://g4m3\"\nHud=\"res://ui/hud.tscn\"\n\n[input]\n\njump={\n\"deadzone\": 0.2,\n\"events\": [Object(InputEventKey,\"keycode\":0,\"physical_keycode\":32,\"key_label\":0,\"unicode\":32)\n]\n}\n\n[layer_names]\n\n2d_physics/layer_3=\"Enemies\"\n",
+    ),
+    (
+        "main.tscn",
+        "[gd_scene format=3 uid=\"uid://m41n\"]\n\n[node name=\"Main\" type=\"Node\"]\n",
+    ),
+    (
+        "game.gd",
+        "extends Node\nconst MAIN := \"res://main.tscn\"\n",
+    ),
+    ("game.gd.uid", "uid://g4m3\n"),
+];
+
+/// Runs with `GDKIT_GODOT` pointing nowhere, so any engine use would fail.
+fn offline(dir: &Path, args: &[&str]) -> Output {
+    let mut all = args.to_vec();
+    all.extend(["--project", dir.to_str().unwrap()]);
+    gdkit(&all)
+}
+
+fn json(dir: &Path, args: &[&str], code: i32) -> serde_json::Value {
+    let mut all = args.to_vec();
+    all.extend(["--output", "json"]);
+    let output = offline(dir, &all);
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn refs_settings_and_autoloads_need_no_engine() {
+    let dir = project(OFFLINE_PROJECT);
+    let dir = dir.path();
+
+    let refs = json(dir, &["refs", "main.tscn"], 0);
+    assert_eq!(refs["path"], "res://main.tscn");
+    assert_eq!(refs["uid"], "uid://m41n");
+    let references: Vec<_> = refs["references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["resource"].as_str().unwrap(),
+                r["line"].as_u64().unwrap(),
+                r["kind"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        references,
+        [
+            ("res://game.gd", 2, "string"),
+            ("res://project.godot", 6, "main_scene")
+        ]
+    );
+    assert_eq!(
+        json(dir, &["refs", "uid://g4m3"], 0)["sidecars"][0],
+        "res://game.gd.uid"
+    );
+    let missing = json(dir, &["refs", "res://mian.tscn"], 1);
+    assert_eq!(missing["exists"], false);
+    assert_eq!(missing["suggestions"][0], "res://main.tscn");
+    let error = tool_error(&offline(dir, &["refs", "uid://nothing"]));
+    assert!(
+        error.contains("no project file claims uid://nothing"),
+        "{error}"
+    );
+
+    let input = json(dir, &["settings", "input"], 0);
+    let actions = input["actions"].as_array().unwrap();
+    assert_eq!(actions[0]["name"], "jump");
+    assert_eq!(actions[0]["events"][0]["physical_keycode"], "KEY_SPACE");
+    assert!(
+        actions
+            .iter()
+            .any(|a| a["name"] == "ui_accept" && a["builtin"] == true)
+    );
+    assert_eq!(
+        json(dir, &["settings", "layers"], 0)["physics_2d"]["3"],
+        "Enemies"
+    );
+    assert_eq!(json(dir, &["settings", "window"], 0)["width"], 1152);
+    let main = json(dir, &["settings", "main-scene"], 0);
+    assert_eq!(
+        (&main["path"], &main["exists"]),
+        (&"res://main.tscn".into(), &true.into())
+    );
+    let name = json(dir, &["settings", "get", "application", "config/name"], 0);
+    assert_eq!(name["value"], "\"Offline\"");
+
+    // Unset values exit 1; human mode keeps stdout empty and suggests on stderr.
+    let unset = offline(dir, &["settings", "get", "application", "config/nme"]);
+    assert_eq!(unset.status.code(), Some(1));
+    assert!(unset.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&unset.stderr).contains("did you mean config/name?"));
+    let bare = project(&[]);
+    assert_eq!(
+        json(bare.path(), &["settings", "main-scene"], 1)["written"],
+        serde_json::Value::Null
+    );
+
+    let autoloads = json(dir, &["autoloads"], 0);
+    let listed: Vec<_> = autoloads["autoloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["name"].as_str().unwrap(),
+                a["kind"].as_str().unwrap(),
+                a["path"].as_str().unwrap(),
+                a["exists"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("Game", "script", "res://game.gd", true),
+            ("Hud", "scene", "res://ui/hud.tscn", false)
+        ]
+    );
+    let human = String::from_utf8(offline(dir, &["autoloads"]).stdout).unwrap();
+    assert!(
+        human.contains("res://ui/hud.tscn  (not a global name; missing)"),
+        "{human}"
+    );
 }
 
 fn succeeded(output: &Output) -> serde_json::Value {

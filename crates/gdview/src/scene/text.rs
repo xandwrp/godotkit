@@ -66,6 +66,7 @@ pub(super) fn parse(source: &str) -> crate::Result<SceneFile> {
                     .push(NodePath(header.required_string("path", line)?)),
                 "resource" => {
                     file.resource.get_or_insert_with(Properties::new);
+                    file.resource_line.get_or_insert(line);
                     target = Target::Resource;
                 }
                 other => return Err(error(line, &format!("unknown section [{other}]"))),
@@ -160,6 +161,7 @@ fn start_file(header: &Header, line: usize) -> crate::Result<SceneFile> {
         connections: Vec::new(),
         editable_instances: Vec::new(),
         resource: None,
+        resource_line: None,
     })
 }
 
@@ -568,9 +570,37 @@ impl Cursor<'_> {
         if !self.eat('(') {
             return Err(self.err(&format!("expected `(` after `{name}`")));
         }
-        let args = self.sequence(')')?;
+        let mut args = Vec::new();
+        if name == "Object" {
+            // `Object(InputEventKey, "prop": value, …)`: the class is a bare word.
+            self.skip_space();
+            let class = self.identifier();
+            if class.is_empty() {
+                return Err(self.err("expected a class name after `Object(`"));
+            }
+            args.push(Value::Str(class));
+            self.skip_space();
+            if !self.eat(',') {
+                return match self.eat(')') {
+                    true => Ok(Value::Call { name, args }),
+                    false => Err(self.err("expected `,` or `)`")),
+                };
+            }
+        }
+        args.extend(self.sequence(')')?);
         Ok(Value::Call { name, args })
     }
+}
+
+/// One value in Godot's variant text format, such as a `project.godot` value.
+pub(super) fn value(source: &str) -> crate::Result<Value> {
+    let mut cursor = Cursor { source, offset: 0 };
+    let value = cursor.value()?;
+    cursor.skip_space();
+    if !cursor.at_end() {
+        return Err(cursor.err("unexpected text after the value"));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -602,5 +632,29 @@ mod tests {
             }
         );
         assert_eq!(items[5], Value::Float(f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn object_keeps_its_class_and_flattens_properties() {
+        let parsed =
+            value("Object(InputEventKey,\"keycode\":32,\n\"position\":Vector2(0, 0))").unwrap();
+        assert_eq!(
+            parsed,
+            Value::Call {
+                name: "Object".into(),
+                args: vec![
+                    Value::Str("InputEventKey".into()),
+                    Value::Str("keycode".into()),
+                    Value::Int(32),
+                    Value::Str("position".into()),
+                    Value::Call {
+                        name: "Vector2".into(),
+                        args: vec![Value::Int(0), Value::Int(0)]
+                    },
+                ]
+            }
+        );
+        assert!(value("Object(,\"a\":1)").is_err());
+        assert!(value("1 2").is_err());
     }
 }

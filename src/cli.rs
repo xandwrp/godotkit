@@ -21,17 +21,20 @@ pub enum Output {
     Json,
 }
 
-/// Shared by every project command.
+/// Shared by every project command. Global, so `settings input --project x`
+/// works as well as `settings --project x input`.
 #[derive(Debug, Args, Clone)]
 pub struct ProjectArgs {
     #[arg(
         long,
+        global = true,
         default_value = ".",
         help = "Project directory or any path inside it"
     )]
     pub project: PathBuf,
     #[arg(
         long,
+        global = true,
         value_name = "PATH",
         help = "Godot editor executable (overrides GDKIT_GODOT, gdkit.toml, and `gdkit config`)"
     )]

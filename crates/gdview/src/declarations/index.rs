@@ -157,6 +157,11 @@ fn resource_uses(parsed: &Parsed, file: SourceFile<'_>) -> Vec<ResourceUse> {
             line: decl.node().line(),
         });
     }
+    // Literals already recorded as an `extends`, `preload`, or `load` argument.
+    let mut claimed = Vec::new();
+    if let Some(decl) = file.extends() {
+        claimed.push(decl.node().trimmed_range());
+    }
     for node in parsed.root().descendants() {
         let (kind, argument) = if let Some(preload) = ast::Preload::cast(node) {
             (ResourceUseKind::Preload, preload.argument())
@@ -170,6 +175,7 @@ fn resource_uses(parsed: &Parsed, file: SourceFile<'_>) -> Vec<ResourceUse> {
         if let Some(argument) = argument
             && let Some(path) = ast::string_literal(argument)
         {
+            claimed.push(argument.trimmed_range());
             uses.push(ResourceUse {
                 kind,
                 path,
@@ -177,6 +183,23 @@ fn resource_uses(parsed: &Parsed, file: SourceFile<'_>) -> Vec<ResourceUse> {
             });
         }
     }
+    for node in parsed.root().descendants() {
+        let Some(path) = ast::string_literal(node) else {
+            continue;
+        };
+        let range = node.trimmed_range();
+        let inside =
+            |outer: &std::ops::Range<usize>| outer.start <= range.start && range.end <= outer.end;
+        if (path.starts_with("res://") || path.starts_with("uid://")) && !claimed.iter().any(inside)
+        {
+            uses.push(ResourceUse {
+                kind: ResourceUseKind::String,
+                path,
+                line: node.line(),
+            });
+        }
+    }
+    uses.sort_by_key(|used| used.line);
     uses
 }
 

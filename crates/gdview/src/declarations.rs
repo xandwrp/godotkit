@@ -4,6 +4,7 @@
 //!
 //! # Tests (tests/declarations.rs)
 //! - `indexes_class_name_extends_and_members_with_line_numbers`
+//! - `res_and_uid_string_literals_are_resource_uses_once`
 //! - `records_annotations_per_member_including_rpc_arguments`
 //! - `distinguishes_static_private_and_export_members`
 //! - `indexes_inner_classes_recursively_with_qualified_names`
@@ -198,6 +199,9 @@ pub enum ResourceUseKind {
     Preload,
     Load,
     Extends,
+    /// Any other `res://` or `uid://` string literal, such as a path passed to
+    /// `change_scene_to_file` or kept in a constant. Not necessarily a file.
+    String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

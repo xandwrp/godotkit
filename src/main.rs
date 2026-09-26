@@ -17,7 +17,8 @@
 //! - `json_mode_writes_exactly_one_json_document_to_stdout_and_nothing_else`
 //! - `tool_errors_exit_2_with_error_prefix_on_stderr`
 //! - `check_exit_code_follows_report_outcome` (via fake-godot)
-//! - `scene_tree_autoloads_refs_settings_net_and_static_check_need_no_engine`
+//! - `scene_tree_and_net_need_no_engine`
+//! - `refs_settings_and_autoloads_need_no_engine`
 //! - `init_writes_config_and_refuses_to_overwrite` (via fake-godot)
 //! - `init_without_godot_follows_the_global_default` (via fake-godot)
 //! - `config_set_get_unset_list_round_trip` (via fake-godot)
