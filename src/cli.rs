@@ -185,14 +185,25 @@ pub enum ConfigKey {
 
 #[derive(Debug, Subcommand)]
 pub enum ResourceCommand {
+    /// Every field a resource spec can set, with types, defaults, and accepted JSON shapes.
+    #[command(group(clap::ArgGroup::new("target").required(true).args(["class", "script"])))]
     Schema {
         #[command(flatten)]
         project: ProjectArgs,
-        #[arg(long, conflicts_with = "script")]
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "A native Resource class, e.g. StandardMaterial3D"
+        )]
         class: Option<String>,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "RES",
+            help = "A Resource script: res://…, or a path inside the project"
+        )]
         script: Option<String>,
     },
+    /// Build a .tres from a JSON spec, verify it by reloading, and publish it as a new file.
     Create {
         #[command(flatten)]
         project: ProjectArgs,

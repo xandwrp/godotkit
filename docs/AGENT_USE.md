@@ -157,9 +157,16 @@ does not exist, a Vector written as a string, a float that loses precision, an
 enum written as its name instead of its value. Godot loads the file anyway and
 silently ignores the bad field.
 
-`schema` returns every field with `variant_type`, `class_name`, `element_type`,
-`default`, `hint`, `enum_choices`, and `accepts` (the JSON shapes that field
-takes). The agent fills a spec from that, never from memory.
+`schema` returns every stored field with `variant_type`, `class_name` (the
+class an Object field requires), `enum_name`, `element` (typed arrays), `key`
+and `value` (typed dictionaries), `default`, `hint`, `enum_choices` (names
+with the values to write), and `accepts` (the JSON shapes that field takes).
+Fields a spec cannot set (RID, Callable, Signal) say why in `unsupported`.
+The agent fills a spec from that, never from memory. `--class` takes a native
+class; a `class_name` script is named by `--script`. Script classes resolve
+only in an imported project; when one does not, the error says how to import.
+Engine output while loading (often from the project's autoloads, which Godot
+runs for any script) is in `engine_diagnostics` and does not fail the command.
 
 `create` assigns every property in the engine, saves, reloads with the cache
 disabled, and echoes each value back. Any divergence is exit `2` with the

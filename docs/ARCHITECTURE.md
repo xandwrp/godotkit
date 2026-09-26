@@ -33,7 +33,7 @@ command scaffolds remain. Check's API-cache diagnostic enrichment is explicitly 
 | One Variant JSON grammar | `gdview::variant::VariantJson` in Rust, `harness/protocol.gd` in GDScript, golden-fixture tested against each other |
 | One result envelope, version-checked | `protocol::Envelope`; `parse_envelope` rejects a version mismatch before decoding the payload |
 | Tool failure vs project failure | Startup/probe/configuration errors are `Err` (exit 2). Failed or incomplete check reports, including phase timeouts, exit 1 |
-| Never mutate an authored file | `workspace::publish_new_file` is create-new only; `IsolatedCopy` and `ArtifactDir` are the only other write paths; probe metadata and artifacts use `.godot/gdkit`; check never seeds or updates the source import cache. The one in-place edit is the user's global config, by `global::GlobalConfig::{set_engine, unset_engine}` only (`gdkit config set`/`unset`), atomically and keeping comments. The engine runs on the real project only for `api`'s `--gdscript-docs` (imported projects, workspace lock, headless, no `--editor`, output to scratch); `real_engine_script_docs_leave_the_project_untouched` pins that it writes nothing there |
+| Never mutate an authored file | `workspace::publish_new_file` is create-new only; `IsolatedCopy` and `ArtifactDir` are the only other write paths; probe metadata and artifacts use `.godot/gdkit`; check never seeds or updates the source import cache. The one in-place edit is the user's global config, by `global::GlobalConfig::{set_engine, unset_engine}` only (`gdkit config set`/`unset`), atomically and keeping comments. The engine runs on the real project only for `api`'s `--gdscript-docs` (imported projects, workspace lock, headless, no `--editor`, output to scratch) and `resource schema` (headless, no `--editor`); `real_engine_script_docs_leave_the_project_untouched` and `real_engine_schema_reports_fields_hints_enums_and_typed_arrays_from_hint_string` pin that they write nothing there |
 | Static before dynamic | `check` runs `gdview::xref` before any engine phase; `--static-only` needs no engine at all |
 | Diagnostics have a stable identity | `Diagnostic.identity` excludes line (including lines embedded in resource parse messages) and occurrence count, and scratch-copy paths are rewritten to `res://`, so `--baseline` survives edits and runs |
 | Platform scope is explicit | Runtime verified on Linux; macOS shares POSIX code but is not runtime-verified here. Windows Job objects are out of scope; no Windows process-tree cleanup guarantee |
@@ -141,6 +141,8 @@ refs:      Project::discover → index_project + UidMap::build + ProjectGraph::l
              (references_to + uid, sidecars, class_name, suggestions) → emit; exit 1 when the path is missing
 settings:  Project::discover → settings() → input_actions | layer_names | window | main_scene (uid via UidMap) | get
 autoloads: Project::discover → settings().autoloads() → Autoloads::resolve (UidMap, kind, exists) → emit
+resource schema: workspace → engine → run_harness ResourceSchema (real project, read-only; raw
+             get_property_list + encoded defaults) → gdview::property::fields → emit
 ```
 
 `input_actions` merges the project's `[input]` over Godot's built-in `ui_*`

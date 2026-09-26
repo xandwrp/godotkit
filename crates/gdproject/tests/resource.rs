@@ -175,12 +175,22 @@ fn schema_errors_keep_the_field_and_hint_at_import_only_without_a_class_cache() 
         other => panic!("{other:?}"),
     }
 
-    // Other stages never get the hint.
-    let (_engine_dir, engine) = fake(json!({"resource_schema": {"mode": "error_envelope"}}));
+    // Unknown class names get it; other class failures and other stages do not.
     fs::remove_file(dir.path().join(".godot/global_script_class_cache.cfg")).unwrap();
-    match resource::schema(&workspace, &engine, &target, DEFAULT_DEADLINE) {
-        Err(Error::Harness { message, .. }) => assert_eq!(message, "fake engine error"),
-        other => panic!("{other:?}"),
+    for (stage, message, field, hinted) in [
+        ("target", "Unknown class Weapon", "class", true),
+        ("target", "Node is not a Resource", "class", false),
+        ("arguments", "Expected `class <Name>`", "script", false),
+    ] {
+        let (_engine_dir, engine) = fake(json!({"resource_schema": {"mode": "error_envelope",
+            "payload": {"stage": stage, "message": message, "field": field}}}));
+        match resource::schema(&workspace, &engine, &class("Weapon"), DEFAULT_DEADLINE) {
+            Err(Error::Harness { message: got, .. }) => {
+                assert!(got.starts_with(message));
+                assert_eq!(got.contains("has not been imported"), hinted, "{got}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
 

@@ -15,8 +15,9 @@
 //! so engine errors and warnings are reported (`engine_diagnostics`), never a
 //! verdict: an autoload that logs an error must not block every resource
 //! command. The harness's own checks and the echo comparison decide.
-//! A target that fails to load in a project with no class cache gets a hint to
-//! import it: script classes (`class_name`) resolve only after an import.
+//! A script that fails to load, or an unknown class name, in a project with no
+//! class cache gets a hint to import it: script classes (`class_name`) resolve
+//! only after an import.
 //!
 //! # Tests (tests/resource.rs)
 //! Offline: `schema_passes_the_target_and_derives_fields_from_the_raw_payload`,
@@ -129,8 +130,8 @@ pub fn schema(
     })
 }
 
-/// A target that cannot load in a never-imported project usually names a
-/// script class the engine has no cache for yet.
+/// In a never-imported project, a script that fails to load, or a class name
+/// the engine does not know, usually involves a script class with no cache yet.
 fn import_hint(workspace: &Workspace, error: crate::Error) -> crate::Error {
     match error {
         crate::Error::Harness {
@@ -138,7 +139,10 @@ fn import_hint(workspace: &Workspace, error: crate::Error) -> crate::Error {
             stage,
             message,
             field,
-        } if stage == "target" && !workspace.root().join(CLASS_CACHE).is_file() => {
+        } if stage == "target"
+            && (field.as_deref() == Some("script") || message.starts_with("Unknown class"))
+            && !workspace.root().join(CLASS_CACHE).is_file() =>
+        {
             crate::Error::Harness {
                 harness,
                 stage,
