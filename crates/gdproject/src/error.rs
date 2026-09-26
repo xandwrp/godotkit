@@ -30,11 +30,13 @@ pub enum Error {
         #[source]
         source: protocol::ProtocolError,
     },
-    #[error("harness {harness} failed at {stage}: {message}")]
+    #[error("harness {harness} failed at {stage}{}: {message}", field_suffix(.field))]
     Harness {
         harness: &'static str,
         stage: String,
         message: String,
+        /// The spec field the failure concerns, e.g. `properties.offset`.
+        field: Option<String>,
     },
     #[error("{path}: {source}")]
     Io {
@@ -53,5 +55,12 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn field_suffix(field: &Option<String>) -> String {
+    field
+        .as_deref()
+        .map(|field| format!(" ({field})"))
+        .unwrap_or_default()
+}
 
 use crate::protocol;

@@ -1561,3 +1561,186 @@ fn doctor_exits_1_on_problems_and_json_is_one_document() {
         .unwrap();
     assert!(tool_error(&output).contains("not inside a Godot project"));
 }
+
+#[test]
+fn resource_schema_json_is_one_document_and_target_errors_exit_2() {
+    let fake = Fake::new(serde_json::json!({"resource_schema": {
+        "payload": {
+            "class": "Resource",
+            "script_class": "WeaponDefinition",
+            "properties": [
+                {"name": "kind", "type": 2, "class_name": "WeaponDefinition.Kind", "hint": 2, "hint_string": "Melee:0,Ranged:5", "usage": 69638, "default": 5},
+                {"name": "tags", "type": 28, "class_name": "", "hint": 23, "hint_string": "4:", "usage": 4102, "default": []},
+                {"name": "spread", "type": 3, "class_name": "", "hint": 1, "hint_string": "0.0,10.0,0.5", "usage": 4102, "default": 1.5},
+            ],
+        },
+        "stderr": "WARNING: an autoload warned\n",
+    }}));
+    let dir = project(&[("res/weapon.gd", "extends Resource\n")]);
+    let schema = |args: &[&str]| {
+        fake.gdkit()
+            .args(["resource", "schema", "--project"])
+            .arg(dir.path())
+            .args(args)
+            .env("GDKIT_GODOT", &fake.executable)
+            .output()
+            .unwrap()
+    };
+
+    let report = succeeded(&schema(&["--script", "res/weapon.gd", "--output", "json"]));
+    assert_eq!(
+        report["target"],
+        serde_json::json!({"script": "res://res/weapon.gd"})
+    );
+    assert_eq!(report["script_class"], "WeaponDefinition");
+    assert_eq!(report["fields"][0]["enum_choices"][1]["value"], 5);
+    assert_eq!(report["fields"][1]["element"]["variant_type"], "String");
+    assert_eq!(
+        report["engine_diagnostics"][0]["message"],
+        "an autoload warned"
+    );
+    let log = fake.take_log();
+    assert!(
+        log.contains(r#""--","script","res://res/weapon.gd"]"#),
+        "{log}"
+    );
+
+    let human = schema(&["--script", "res://res/weapon.gd"]);
+    assert_eq!(human.status.code(), Some(0));
+    let stdout = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        stdout.starts_with("WeaponDefinition (res://res/weapon.gd, extends Resource)\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  kind    WeaponDefinition.Kind  = 5  {Melee=0, Ranged=5}\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("  tags    Array[String]"), "{stdout}");
+    assert!(stdout.contains("range(0.0,10.0,0.5)"), "{stdout}");
+    assert!(
+        stdout.ends_with("engine: 0 error(s), 1 warning(s) while loading (see --output json)\n")
+    );
+
+    // Exactly one target; both or neither is a usage error before any engine run.
+    fake.take_log();
+    for args in [
+        &[][..],
+        &["--class", "Curve", "--script", "res://res/weapon.gd"],
+    ] {
+        assert_eq!(schema(args).status.code(), Some(2));
+    }
+    assert!(schema(&["--script", "/elsewhere/weapon.gd"]).status.code() == Some(2));
+    assert_eq!(fake.take_log(), "");
+
+    let fake = Fake::new(
+        serde_json::json!({"resource_schema": {"mode": "error_envelope", "payload": {
+            "stage": "target", "message": "Node is not a Resource", "field": "class",
+        }}}),
+    );
+    let output = fake
+        .gdkit()
+        .args([
+            "resource",
+            "schema",
+            "--class",
+            "Node",
+            "--output",
+            "json",
+            "--project",
+        ])
+        .arg(dir.path())
+        .env("GDKIT_GODOT", &fake.executable)
+        .output()
+        .unwrap();
+    assert_eq!(
+        tool_error(&output),
+        "error: harness resource_schema failed at target (class): Node is not a Resource\n"
+    );
+}
+
+#[test]
+fn resource_create_publishes_a_verified_file_and_every_failure_exits_2() {
+    let fake = Fake::new(serde_json::json!({}));
+    let dir = project(&[("weapon.gd", "extends Resource\n"), ("weapons/.keep", "")]);
+    let spec = dir.path().join("shotgun.json");
+    fs::write(
+        &spec,
+        r#"{"script": "res://weapon.gd", "properties": {"damage": 3, "offset": {"$variant": {"type": "Vector2", "value": [1, 2.5]}}}}"#,
+    )
+    .unwrap();
+    let create = |fake: &Fake, spec: &Path, out: &str, json: bool| {
+        let mut command = fake.gdkit();
+        command
+            .args(["resource", "create", "--project"])
+            .arg(dir.path())
+            .arg("--spec")
+            .arg(spec)
+            .args(["--out", out])
+            .env("GDKIT_GODOT", &fake.executable);
+        if json {
+            command.args(["--output", "json"]);
+        }
+        command.output().unwrap()
+    };
+
+    let report = succeeded(&create(&fake, &spec, "res://weapons/shotgun.tres", true));
+    assert_eq!(report["path"], "res://weapons/shotgun.tres");
+    assert_eq!(
+        report["target"],
+        serde_json::json!({"script": "res://weapon.gd"})
+    );
+    assert_eq!(report["properties_written"], 2);
+    assert_eq!(report["properties"]["damage"], 3);
+    assert!(dir.path().join("weapons/shotgun.tres").is_file());
+
+    let human = create(&fake, &spec, "weapons/rifle.tres", false);
+    assert_eq!(human.status.code(), Some(0));
+    let stdout = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        stdout.starts_with(
+            "created res://weapons/rifle.tres (res://weapon.gd, 2 properties)\n  damage  = 3\n"
+        ),
+        "{stdout}"
+    );
+
+    // Offline failures exit 2 before any engine run and write nothing.
+    fake.take_log();
+    let missing = dir.path().join("missing.json");
+    let not_json = dir.path().join("not.json");
+    fs::write(&not_json, "{").unwrap();
+    let bad_spec = dir.path().join("bad.json");
+    fs::write(&bad_spec, r#"{"script": "res://weapon.gd", "properties": {"offset": {"$variant": {"type": "Vector2", "value": [1]}}}}"#).unwrap();
+    let gone = dir.path().join("gone.json");
+    fs::write(&gone, r#"{"script": "res://gone.gd"}"#).unwrap();
+    for (spec, out, expected) in [
+        (&missing, "res://weapons/a.tres", "missing.json"),
+        (&not_json, "res://weapons/a.tres", "not JSON"),
+        (&bad_spec, "res://weapons/a.tres", "at /properties/offset"),
+        (
+            &spec,
+            "res://weapons/shotgun.tres",
+            "already exists; gdkit never overwrites",
+        ),
+        (&spec, "res://armor/a.tres", "res://armor does not exist"),
+        (&spec, "res://weapons/a.res", "must name a .tres file"),
+        (&gone, "res://weapons/a.tres", "do not exist: res://gone.gd"),
+    ] {
+        let stderr = tool_error(&create(&fake, spec, out, true));
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+    assert_eq!(fake.take_log(), "", "no engine run");
+
+    // A verify failure names the field; nothing is published or left staged.
+    let lossy = Fake::new(serde_json::json!({"resource_create": {"payload": {"echo": {
+        "damage": 3, "offset": {"$variant": {"type": "Vector2", "value": [1.0, 2.0]}},
+    }}}}));
+    let entries = || fs::read_dir(dir.path().join("weapons")).unwrap().count();
+    let before = entries();
+    let stderr = tool_error(&create(&lossy, &spec, "res://weapons/lossy.tres", true));
+    assert_eq!(
+        stderr,
+        "error: harness resource_create failed at verify (properties.offset[1]): the engine stored 2.0 where the spec has 2.5\n"
+    );
+    assert_eq!(entries(), before);
+}

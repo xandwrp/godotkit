@@ -19,8 +19,8 @@ in the same change that implements the command.
 
 The command surface is exactly what [AGENT_USE.md](AGENT_USE.md) lists. Anything
 not on that page is not stubbed, on purpose. These flows describe the intended
-architecture: `check`, `api`, `init`, `config`, and `doctor` are implemented end to end, but other
-command scaffolds remain. Check's API-cache diagnostic enrichment is explicitly deferred.
+architecture: `check`, `api`, `init`, `config`, `doctor`, `refs`, `settings`, `autoloads`, and
+`resource` are implemented end to end, but other command scaffolds remain. Check's API-cache diagnostic enrichment is explicitly deferred.
 
 ## Rules that are enforced by structure, not discipline
 
@@ -33,7 +33,7 @@ command scaffolds remain. Check's API-cache diagnostic enrichment is explicitly 
 | One Variant JSON grammar | `gdview::variant::VariantJson` in Rust, `harness/protocol.gd` in GDScript, golden-fixture tested against each other |
 | One result envelope, version-checked | `protocol::Envelope`; `parse_envelope` rejects a version mismatch before decoding the payload |
 | Tool failure vs project failure | Startup/probe/configuration errors are `Err` (exit 2). Failed or incomplete check reports, including phase timeouts, exit 1 |
-| Never mutate an authored file | `workspace::publish_new_file` is create-new only; `IsolatedCopy` and `ArtifactDir` are the only other write paths; probe metadata and artifacts use `.godot/gdkit`; check never seeds or updates the source import cache. The one in-place edit is the user's global config, by `global::GlobalConfig::{set_engine, unset_engine}` only (`gdkit config set`/`unset`), atomically and keeping comments. The engine runs on the real project only for `api`'s `--gdscript-docs` (imported projects, workspace lock, headless, no `--editor`, output to scratch); `real_engine_script_docs_leave_the_project_untouched` pins that it writes nothing there |
+| Never mutate an authored file | `workspace::publish_new_file` is create-new only; `IsolatedCopy` and `ArtifactDir` are the only other write paths; probe metadata and artifacts use `.godot/gdkit`; check never seeds or updates the source import cache. The one in-place edit is the user's global config, by `global::GlobalConfig::{set_engine, unset_engine}` only (`gdkit config set`/`unset`), atomically and keeping comments. The engine runs on the real project only for `api`'s `--gdscript-docs` (imported projects, workspace lock, headless, no `--editor`, output to scratch) and `resource schema`/`create` (headless, no `--editor`); `real_engine_script_docs_leave_the_project_untouched`, `real_engine_schema_reports_fields_hints_enums_and_typed_arrays_from_hint_string` and `real_engine_create_writes_only_the_destination` pin that they write nothing there but, for `create`, the published file |
 | Static before dynamic | `check` runs `gdview::xref` before any engine phase; `--static-only` needs no engine at all |
 | Diagnostics have a stable identity | `Diagnostic.identity` excludes line (including lines embedded in resource parse messages) and occurrence count, and scratch-copy paths are rewritten to `res://`, so `--baseline` survives edits and runs |
 | Platform scope is explicit | Runtime verified on Linux; macOS shares POSIX code but is not runtime-verified here. Windows Job objects are out of scope; no Windows process-tree cleanup guarantee |
@@ -141,6 +141,8 @@ refs:      Project::discover → index_project + UidMap::build + ProjectGraph::l
              (references_to + uid, sidecars, class_name, suggestions) → emit; exit 1 when the path is missing
 settings:  Project::discover → settings() → input_actions | layer_names | window | main_scene (uid via UidMap) | get
 autoloads: Project::discover → settings().autoloads() → Autoloads::resolve (UidMap, kind, exists) → emit
+resource schema: workspace → engine → run_harness ResourceSchema (real project, read-only; raw
+             get_property_list + encoded defaults) → gdview::property::fields → emit
 ```
 
 `input_actions` merges the project's `[input]` over Godot's built-in `ui_*`
@@ -153,15 +155,22 @@ are named with the engine's enum constants (`settings/input_names.rs`).
 
 ```
   1. read spec → gdproject::resource::CreateSpec::from_json  (gdview::variant validation, offline)
-  2. workspace, engine
+  2. workspace; check_destination + check_references (offline, before any engine); engine
   3. gdproject::resource::create
-       a. destination: ResPath, .tres, not under .godot, does not exist
-       b. stage temp file in the destination's directory
-       c. run_harness ResourceCreate (spec path, staged path)  → echo of every property
-       d. compare echo to spec in Rust (second verification)
+       a. destination: a new, non-hidden .tres in an existing directory reached without symlinks;
+          every script and $ref in the spec exists; workspace lock
+       b. stage `.<stem>.gdkit-staged-<pid>.tres` in the destination's directory
+       c. run_harness ResourceCreate (spec file in scratch, staged res:// path)
+            harness: build (values read as their declared types), read back each set,
+            save, reload CACHE_MODE_IGNORE, compare, echo each spec'd property
+       d. verify_echo in Rust (second verification; exact up to lossless readings)
        e. workspace::publish_new_file(staged, destination)      create-new, atomic
        any failure: remove staged, Err (exit 2; nothing published)
 ```
+
+Godot 4.7.2's `.tres` text writes `-0.0` as `0` in every float slot, so a spec
+holding `-0.0` fails at `verify` with that explanation;
+`real_engine_round_trips_every_variant_type` pins it.
 
 ### `gdkit run --scene res://x.tscn --frames 120 --until /round/phase=playing`
 
@@ -223,7 +232,7 @@ or Windows process-lifecycle guarantees.
 | gdproject::process | `sleep`/`sh`/`cmd` subjects: deadline, tree kill, log streaming, guard drop | none |
 | gdproject::engine, runner, api, check, run, doctor | `fake-godot` with per-executable scenario/log sidecars; asserts exact argv, envelopes, timeouts, artifacts | `real_engine_*`: harness correctness, golden fixtures, the API dump, script docs leaving the project untouched |
 | gdproject::protocol, diagnostics, workspace, config, global | pure | `protocol_gd` golden refresh |
-| gdproject::resource, probe, cache | validation, echo mismatch, staging cleanup, fake TCP responder, lock | round-trip every Variant type; probe under script error |
+| gdproject::resource, probe, cache | validation, echo comparison, staging cleanup, fake TCP responder, lock | round-trip every Variant type, nested resources and refs, schema hints; probe under script error |
 | gdkit | drives the binary; JSON purity, exit codes; engine tests build the fake helper once per run via offline Cargo into `target/tmp` (reused across runs; three-minute deadline) | none |
 
 Test names in `tests/*.rs` are the acceptance checklist and are repeated in each

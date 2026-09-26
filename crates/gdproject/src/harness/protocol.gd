@@ -201,8 +201,11 @@ static func encode(value: Variant) -> Variant:
 ## {"ok": bool, "value": encoded JSON or null, "error": message}. Stops at the
 ## first error: cyclic containers or inline resources, more than MAX_DEPTH nesting,
 ## more than MAX_ENTRIES values in total, or a value the grammar cannot carry.
-static func try_encode(value: Variant) -> Dictionary:
-	var state := {"entries": 0, "path": [], "error": ""}
+## `loose_object_arrays` encodes Object-typed arrays as plain arrays instead of
+## failing; only for callers that report the element class separately (the
+## resource harnesses, whose schema carries each field's declared type).
+static func try_encode(value: Variant, loose_object_arrays: bool = false) -> Dictionary:
+	var state := {"entries": 0, "path": [], "error": "", "loose": loose_object_arrays}
 	var encoded: Variant = _encode(value, 0, state, false)
 	if state.error:
 		return {"ok": false, "value": null, "error": state.error}
@@ -337,7 +340,8 @@ static func _encode(value: Variant, depth: int, state: Dictionary, component: bo
 				items.append_array([column.x, column.y, column.z, column.w])
 			return _tag(type, _encode_items(items, depth, state, true))
 		TYPE_ARRAY:
-			if value.is_typed() and value.get_typed_builtin() == TYPE_OBJECT:
+			var object_typed: bool = value.is_typed() and value.get_typed_builtin() == TYPE_OBJECT
+			if object_typed and not state.get("loose", false):
 				return _fail(
 					state,
 					"Object-typed arrays require class/script metadata not defined by this grammar"
@@ -347,7 +351,7 @@ static func _encode(value: Variant, depth: int, state: Dictionary, component: bo
 			state.path.append(value)
 			var items := _encode_items(value, depth, state, false)
 			state.path.pop_back()
-			if value.is_typed():
+			if value.is_typed() and not object_typed:
 				return {
 					"$variant":
 					{

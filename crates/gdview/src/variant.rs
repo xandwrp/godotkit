@@ -78,6 +78,7 @@
 //! - `to_json_then_from_json_is_identity_for_every_variant_type`
 //! - `non_finite_floats_are_accepted_only_in_tagged_string_form`
 //! - `variant_type_names_and_codes_match_godot`
+//! - `resource_spec_decodes_a_bare_resource_object_at_the_root`
 //!
 //! The engine golden is decoded and re-encoded by
 //! `gdproject/tests/protocol.rs::engine_golden_cases_decode_and_reencode_identically`.
@@ -128,6 +129,51 @@ pub enum VariantJson {
 pub struct ResourceSpec {
     pub target: ResourceTarget,
     pub properties: BTreeMap<String, VariantJson>,
+}
+
+impl ResourceSpec {
+    /// Decodes a bare resource object (`{"class"|"script": …, "properties"?: …}`,
+    /// the payload of a `$resource` tag) at the root, as a `resource create`
+    /// spec is written. Errors point into it (`/properties/damage`).
+    pub fn from_json(value: &serde_json::Value, limits: &Limits) -> crate::Result<Self> {
+        match (Decoder { limits, entries: 0 }).resource(1, value, 0, Loc::Root)? {
+            VariantJson::Resource(spec) => Ok(spec),
+            _ => unreachable!("Decoder::resource returns a resource"),
+        }
+    }
+
+    /// Every `$ref` path and resource `script` path in this spec, nested ones
+    /// included, in encounter order (duplicates kept).
+    pub fn paths(&self) -> Vec<&ResPath> {
+        let mut paths = Vec::new();
+        collect_resource_paths(self, &mut paths);
+        paths
+    }
+}
+
+fn collect_resource_paths<'a>(spec: &'a ResourceSpec, paths: &mut Vec<&'a ResPath>) {
+    if let ResourceTarget::Script(script) = &spec.target {
+        paths.push(script);
+    }
+    for value in spec.properties.values() {
+        collect_value_paths(value, paths);
+    }
+}
+
+fn collect_value_paths<'a>(value: &'a VariantJson, paths: &mut Vec<&'a ResPath>) {
+    match value {
+        VariantJson::Ref(path) => paths.push(path),
+        VariantJson::Resource(spec) => collect_resource_paths(spec, paths),
+        VariantJson::Array(items) | VariantJson::TypedArray { items, .. } => items
+            .iter()
+            .for_each(|item| collect_value_paths(item, paths)),
+        VariantJson::Dictionary(pairs) => pairs.iter().for_each(|(key, value)| {
+            collect_value_paths(key, paths);
+            collect_value_paths(value, paths);
+        }),
+        VariantJson::Tagged { value, .. } => collect_value_paths(value, paths),
+        _ => {}
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,6 +335,12 @@ impl VariantType {
 
     pub fn from_code(code: u32) -> Option<Self> {
         Self::ALL.get(usize::try_from(code).ok()?).copied()
+    }
+
+    /// Component count of a fixed-size tagged payload (vectors, colors, rects,
+    /// transforms, …) and whether its components are integers.
+    pub fn components(self) -> Option<(usize, bool)> {
+        self.tuple().map(|(count, kind)| (count, kind == Kind::I32))
     }
 
     /// Tuple payload shape: component count and component kind.

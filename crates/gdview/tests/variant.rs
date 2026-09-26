@@ -722,3 +722,69 @@ fn variant_type_names_and_codes_match_godot() {
         assert!(serde_json::from_value::<VariantType>(json!(wrong)).is_err());
     }
 }
+
+#[test]
+fn resource_spec_decodes_a_bare_resource_object_at_the_root() {
+    let limits = Limits::default();
+    let spec = ResourceSpec::from_json(
+        &json!({
+            "script": "res://weapon.gd",
+            "properties": {
+                "damage": 3,
+                "icon": {"$ref": "res://icon.png"},
+                "ammo": {"$resource": {"script": "res://ammo.gd", "properties": {
+                    "pickups": [{"$ref": "res://pickup.tres"}],
+                }}},
+                "lookup": {"$variant": {"type": "Dictionary", "value": [[{"$ref": "res://key.tres"}, 1]]}},
+            },
+        }),
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(
+        spec.target,
+        ResourceTarget::Script(ResPath::parse("res://weapon.gd").unwrap())
+    );
+    assert_eq!(spec.properties["damage"], VariantJson::Int(3));
+    let paths: Vec<&str> = spec.paths().into_iter().map(ResPath::as_str).collect();
+    assert_eq!(
+        paths,
+        [
+            "res://weapon.gd",
+            "res://ammo.gd",
+            "res://pickup.tres",
+            "res://icon.png",
+            "res://key.tres",
+        ]
+    );
+
+    let bare = ResourceSpec::from_json(&json!({"class": "Curve"}), &limits).unwrap();
+    assert!(bare.properties.is_empty());
+    assert!(bare.paths().is_empty());
+
+    for (value, expected) in [
+        (json!([]), "at /: invalid resource spec"),
+        (
+            json!({"class": "Curve", "extra": 1}),
+            "at /: unknown resource spec field \"extra\"",
+        ),
+        (
+            json!({"class": "Curve", "script": "res://a.gd"}),
+            "exactly one of class or script",
+        ),
+        (json!({"properties": {}}), "exactly one of class or script"),
+        (
+            json!({"class": "Curve", "properties": []}),
+            "properties must be an object",
+        ),
+        (
+            json!({"class": "Curve", "properties": {"offset": {"$variant": {"type": "Vector2", "value": [1]}}}}),
+            "at /properties/offset",
+        ),
+    ] {
+        let error = ResourceSpec::from_json(&value, &limits)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{value}: {error}");
+    }
+}
