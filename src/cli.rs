@@ -140,6 +140,8 @@ pub struct ApiArgs {
     pub member: Option<String>,
     #[arg(long, conflicts_with_all = ["query", "member"], help = "Write the full native index as JSON")]
     pub dump: bool,
+    #[arg(long, default_value_t = 20, help = "Most results for `search`")]
+    pub limit: usize,
 }
 
 #[derive(Debug, Subcommand)]

@@ -1241,3 +1241,117 @@ fn help_tags_every_command_that_is_not_ready() {
         }
     }
 }
+
+/// The fake engine's outputs for `api`: the trimmed 4.7.2 dump and doctool
+/// fixtures from gdview, plus docs for one project script.
+fn api_fake() -> Fake {
+    let fixture = |name: &str| {
+        fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("crates/gdview/tests/fixtures/api")
+                .join(name),
+        )
+        .unwrap()
+    };
+    Fake::new(serde_json::json!({
+        "--dump-extension-api-with-docs": {
+            "files": {"extension_api.json": fixture("extension_api.json")}
+        },
+        "--doctool": {"files": {
+            "modules/gdscript/doc_classes/@GDScript.xml": fixture("doctool/@GDScript.xml"),
+            "doc/classes/Node.xml": fixture("doctool/Node.xml"),
+        }},
+        "--gdscript-docs": {"files": {
+            "Player.xml": "<class name=\"Player\" inherits=\"CharacterBody3D\"><brief_description>The hero.</brief_description></class>"
+        }},
+    }))
+}
+
+#[test]
+fn api_exit_codes_follow_the_answer_and_json_is_one_document() {
+    let fake = api_fake();
+    let dir = project(&[("player.gd", "class_name Player\nextends CharacterBody3D\n")]);
+    let api = |args: &[&str]| {
+        fake.gdkit()
+            .arg("api")
+            .arg("--project")
+            .arg(dir.path())
+            .args(args)
+            .env("GDKIT_GODOT", &fake.executable)
+            .output()
+            .unwrap()
+    };
+    let json = |output: &Output, code: i32| -> serde_json::Value {
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    let found = json(
+        &api(&["--output", "json", "CharacterBody3D", "move_and_slide"]),
+        0,
+    );
+    assert_eq!(found["kind"], "member");
+    assert_eq!(
+        found["signature"],
+        "CharacterBody3D.move_and_slide() -> bool"
+    );
+    assert_eq!(found["engine_version"], "4.7.2.stable.arch_linux");
+    assert!(
+        found.get("project_scripts").is_none(),
+        "engine answers skip the scripts"
+    );
+
+    let miss = json(
+        &api(&["--output", "json", "CharacterBody3D", "move_and_slid"]),
+        1,
+    );
+    assert_eq!(miss["kind"], "miss");
+    assert_eq!(miss["suggestions"][0], "move_and_slide");
+
+    let player = json(&api(&["--output", "json", "Player", "move_and_slide"]), 0);
+    assert_eq!(player["declaring_class"], "CharacterBody3D");
+    assert_eq!(player["project_scripts"]["source"], "script_copy");
+
+    let search = json(
+        &api(&["--output", "json", "search", "player", "--limit", "1"]),
+        0,
+    );
+    assert_eq!(search["results"][0]["name"], "Player");
+
+    let human = api(&["lerp"]);
+    assert_eq!(human.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&human.stdout)
+            .starts_with("lerp(from: Variant, to: Variant, weight: Variant) -> Variant")
+    );
+    assert!(String::from_utf8_lossy(&human.stderr).starts_with("engine: "));
+
+    let error = api(&["search"]);
+    assert_eq!(error.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&error.stderr)
+            .starts_with("error: `gdkit api search` needs a term")
+    );
+
+    let outside = tempfile::tempdir().unwrap();
+    let dump = fake
+        .gdkit()
+        .args(["--output", "json", "api", "--dump"])
+        .current_dir(outside.path())
+        .env("GDKIT_GODOT", &fake.executable)
+        .output()
+        .unwrap();
+    let index = json(&dump, 0);
+    assert!(index["classes"]["CharacterBody3D"].is_object());
+    assert!(!outside.path().join(".godot").exists());
+}

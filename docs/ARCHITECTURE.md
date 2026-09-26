@@ -19,7 +19,7 @@ in the same change that implements the command.
 
 The command surface is exactly what [AGENT_USE.md](AGENT_USE.md) lists. Anything
 not on that page is not stubbed, on purpose. These flows describe the intended
-architecture: `check`, `init`, and `config` are implemented end to end, but other
+architecture: `check`, `api`, `init`, and `config` are implemented end to end, but other
 command scaffolds remain. Check's API-cache diagnostic enrichment is explicitly deferred.
 
 ## Rules that are enforced by structure, not discipline
@@ -33,7 +33,7 @@ command scaffolds remain. Check's API-cache diagnostic enrichment is explicitly 
 | One Variant JSON grammar | `gdview::variant::VariantJson` in Rust, `harness/protocol.gd` in GDScript, golden-fixture tested against each other |
 | One result envelope, version-checked | `protocol::Envelope`; `parse_envelope` rejects a version mismatch before decoding the payload |
 | Tool failure vs project failure | Startup/probe/configuration errors are `Err` (exit 2). Failed or incomplete check reports, including phase timeouts, exit 1 |
-| Never mutate an authored file | `workspace::publish_new_file` is create-new only; `IsolatedCopy` and `ArtifactDir` are the only other write paths; probe metadata and artifacts use `.godot/gdkit`; check never seeds or updates the source import cache. The one in-place edit is the user's global config, by `global::GlobalConfig::{set_engine, unset_engine}` only (`gdkit config set`/`unset`), atomically and keeping comments |
+| Never mutate an authored file | `workspace::publish_new_file` is create-new only; `IsolatedCopy` and `ArtifactDir` are the only other write paths; probe metadata and artifacts use `.godot/gdkit`; check never seeds or updates the source import cache. The one in-place edit is the user's global config, by `global::GlobalConfig::{set_engine, unset_engine}` only (`gdkit config set`/`unset`), atomically and keeping comments. The engine runs on the real project only for `api`'s `--gdscript-docs` (imported projects, workspace lock, headless, no `--editor`, output to scratch); `real_engine_script_docs_leave_the_project_untouched` pins that it writes nothing there |
 | Static before dynamic | `check` runs `gdview::xref` before any engine phase; `--static-only` needs no engine at all |
 | Diagnostics have a stable identity | `Diagnostic.identity` excludes line (including lines embedded in resource parse messages) and occurrence count, and scratch-copy paths are rewritten to `res://`, so `--baseline` survives edits and runs |
 | Platform scope is explicit | Runtime verified on Linux; macOS shares POSIX code but is not runtime-verified here. Windows Job objects are out of scope; no Windows process-tree cleanup guarantee |
@@ -77,18 +77,31 @@ or replace a required completion payload.
 ### `gdkit api`
 
 ```
-  1. workspace, engine
-  2. gdproject::api::ProjectApi::load
-       a. extension_fingerprint(root) + engine.fingerprint → cache key
-       b. cache hit → ApiIndex from api-index.json
-          miss → run_engine --dump-extension-api-with-docs (temp dir, --path project)
-                 → gdview::api::ApiIndex::from_extension_api_json; not cached if the run printed errors
-       c. gdview::declarations::index_project(project)
-  3. one arg:  lookup_class, else lookup_global (utility function / global enum)
-     two args: lookup_member → Found | ClassMissing{suggestions} | MemberMissing{suggestions}
-     search:   search
-  4. emit; a miss is Exit::Failed with suggestions
---dump: load_native (or load_native_standalone with an empty IsolatedCopy) → print ApiIndex JSON
+gdkit::commands::api
+  1. ctx.workspace, ctx.engine
+  2. gdproject::api::load_native                                   cache: .godot/gdkit/api-index.json
+       key: engine fingerprint + gdview::api::API_INDEX_SCHEMA_VERSION; corrupt or stale = miss
+       miss, in a bare scratch dir via runner::run_projectless (no --path; under --path
+       Godot 4.7.2 writes the dump into the project and aborts):
+         a. --dump-extension-api-with-docs → gdview::api::ApiIndex::from_extension_api_json
+         b. --doctool <dir>                → gdview::api::doc_xml::parse_class per file
+                                           → ApiIndex::merge_doctool (@GDScript, property defaults, enum property types)
+         either run failing or writing nothing usable is an error (exit 2); nothing is cached
+  3. a class, member, or global the native index knows → answer from it alone
+     otherwise (search, project classes, misses) → ProjectApi::with_scripts:
+       gdproject::api::load_scripts                                cache: .godot/gdkit/api-scripts.json
+         key: engine, schema, imported?, class cache, project.godot, every script's bytes
+         imported (has .godot/global_script_class_cache.cfg) and the lock is free:
+           run_engine --path <project> --doctool <scratch> --gdscript-docs res:// <placeholder scene>
+         else: the same on IsolatedCopy::slice(scripts + project.godot)
+         the placeholder scene skips resolving a uid:// run/main_scene, which otherwise aborts with an OS alert
+         XML → ApiClass keyed by class_name, else autoload name (uid:// autoloads via UidMap), else res:// path
+         scripts the engine did not document → gdview::declarations, from_engine: false, with the engine's reason
+         a failed run → every script from source, not cached
+       ApiIndex::add_scripts (api_type "script"; a class_name equal to an engine class is not added)
+  4. gdview::api::answer::{lookup, lookup_member, search} → Answer (class | member | search | miss)
+  5. emit; a miss is Exit::Failed with suggestions
+--dump: load_native (or load_native_standalone outside a project) → print ApiIndex JSON
 ```
 
 ### `gdkit init` and `gdkit config …`
@@ -171,7 +184,8 @@ against `VariantJson::to_json` offline, so the two encoders cannot drift silentl
 
 Harnesses: `probe`, `check`, `import_scan`, `resource_schema`, `resource_create`,
 `runtime_probe` (the game-side half of `run`), `script_bootstrap`. The API index
-needs no harness; it comes from the engine's own `--dump-extension-api-with-docs`.
+needs no harness; it comes from the engine's own `--dump-extension-api-with-docs`,
+`--doctool`, and `--doctool --gdscript-docs`.
 
 ## Test matrix
 
@@ -181,9 +195,9 @@ or Windows process-lifecycle guarantees.
 
 | Site | Offline | Engine-backed (`GDKIT_TEST_GODOT`, `#[ignore]`) |
 | --- | --- | --- |
-| gdview (all modules) | fixtures + strings; every test | syntax corpus (`GODOT_SOURCE`); `extension_api.json` fixture refresh |
+| gdview (all modules) | fixtures + strings; every test | syntax corpus (`GODOT_SOURCE`); `real_engine_refresh_api_fixtures` (trimmed dump + doctool XML) |
 | gdproject::process | `sleep`/`sh`/`cmd` subjects: deadline, tree kill, log streaming, guard drop | none |
-| gdproject::engine, runner, api, check, run | `fake-godot` with per-executable scenario/log sidecars; asserts exact argv, envelopes, timeouts, artifacts | `real_engine_*`: harness correctness, golden fixtures, the GDExtension-in-dump question |
+| gdproject::engine, runner, api, check, run | `fake-godot` with per-executable scenario/log sidecars; asserts exact argv, envelopes, timeouts, artifacts | `real_engine_*`: harness correctness, golden fixtures, the API dump, script docs leaving the project untouched |
 | gdproject::protocol, diagnostics, workspace, config, global | pure | `protocol_gd` golden refresh |
 | gdproject::resource, probe, cache | validation, echo mismatch, staging cleanup, fake TCP responder, lock | round-trip every Variant type; probe under script error |
 | gdkit | drives the binary; JSON purity, exit codes; engine tests build the fake helper once per run via offline Cargo into `target/tmp` (reused across runs; three-minute deadline) | none |
@@ -198,11 +212,12 @@ assets, never pre-seeded import caches.
 
 ## Open questions
 
-- **GDExtension classes in the API dump.** `--dump-extension-api-with-docs` under
-  `--path` may or may not include classes registered by project extensions.
-  `real_engine_dump_includes_project_gdextension_classes` answers it. If no, a
-  ClassDB harness scoped to that delta is the follow-up; `ApiIndex.extension_classes`
-  is where its result lands.
+- **GDExtension classes in `api`.** Deferred. The dump runs without a project
+  (it must: under `--path`, 4.7.2 aborts), so project extension classes cannot
+  appear in it. `ClassDB.class_get_api_type` exists, so a small harness can list
+  the delta; `--doctool --gdextension-docs` could document it. The result would
+  land in `ApiIndex.extension_classes`. Nothing on this machine has a
+  `.gdextension` to test against yet.
 - **Multi-participant runs.** `run` is single-process. Servers plus clients is a
   list of `RunRequest`s with a readiness order and port hand-off, layered on top
   when there is a project that needs it. Nothing in the surface anticipates it.

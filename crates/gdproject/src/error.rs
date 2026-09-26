@@ -19,6 +19,9 @@ pub enum Error {
     Probe { message: String, output: String },
     #[error("could not run engine: {0}")]
     Spawn(#[source] std::io::Error),
+    /// A raw engine run (no harness) that exited unsuccessfully or wrote nothing usable.
+    #[error("{what} failed: {message}")]
+    EngineRun { what: String, message: String },
     #[error("{what} exceeded its deadline of {deadline:?}")]
     Timeout { what: String, deadline: Duration },
     #[error("harness {harness}: {source}")]

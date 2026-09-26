@@ -849,3 +849,121 @@ fn malformed_missing_manifests_and_complex_inheritance_do_not_claim_success() {
     assert!(fake.run(&args).success());
     assert_eq!(fs::read_to_string(fake.cache()).unwrap(), "custom");
 }
+
+#[test]
+fn dump_and_doctool_write_outputs_and_a_dump_under_path_aborts_like_godot() {
+    let fake = Fake::new(json!({}));
+    let out = tempfile::tempdir().unwrap();
+    let mut spawn = fake.spawn(&["--headless", "--dump-extension-api-with-docs"]);
+    spawn.cwd = Some(out.path().to_owned());
+    let dumped = process::run(&spawn, Duration::from_secs(5)).unwrap();
+    assert!(dumped.success(), "{}", stderr(&dumped));
+    let dump: Value =
+        serde_json::from_str(&fs::read_to_string(out.path().join("extension_api.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        dump["header"]["version_full_name"],
+        "Godot Engine v4.7.2.stable.fake"
+    );
+
+    let doc = out.path().join("doc");
+    let refused = fake.run(&["--headless", "--doctool", doc.to_str().unwrap()]);
+    assert_eq!(refused.status.unwrap().code(), Some(1));
+    assert!(stderr(&refused).contains("must be a valid directory path"));
+    fs::create_dir(&doc).unwrap();
+    let documented = fake.run(&["--headless", "--doctool", doc.to_str().unwrap()]);
+    assert!(documented.success(), "{}", stderr(&documented));
+    assert!(
+        doc.join("modules/gdscript/doc_classes/@GDScript.xml")
+            .is_file()
+    );
+
+    let project = fake.dir.path().to_str().unwrap();
+    let aborted = fake.run(&[
+        "--headless",
+        "--path",
+        project,
+        "--dump-extension-api-with-docs",
+    ]);
+    assert_eq!(aborted.status.unwrap().code(), Some(134));
+    assert!(stderr(&aborted).contains("ERROR: Parameter \"singleton\" is null."));
+    assert!(fake.dir.path().join("extension_api.json").is_file());
+
+    let configured = Fake::new(json!({
+        "--dump-extension-api-with-docs": {"files": {"extension_api.json": "{}"}},
+        "--doctool": {"files": {"doc/classes/Node.xml": "<class name=\"Node\"/>"}},
+    }));
+    let out = tempfile::tempdir().unwrap();
+    let mut spawn = configured.spawn(&["--dump-extension-api-with-docs"]);
+    spawn.cwd = Some(out.path().to_owned());
+    assert!(
+        process::run(&spawn, Duration::from_secs(5))
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        fs::read_to_string(out.path().join("extension_api.json")).unwrap(),
+        "{}"
+    );
+    let doc = out.path().join("doc");
+    fs::create_dir(&doc).unwrap();
+    assert!(
+        configured
+            .run(&["--doctool", doc.to_str().unwrap()])
+            .success()
+    );
+    assert!(doc.join("doc/classes/Node.xml").is_file());
+    assert!(!doc.join("modules").exists(), "files replace the defaults");
+
+    let crashing = Fake::new(json!({"--dump-extension-api-with-docs": {"mode": "crash"}}));
+    let out = tempfile::tempdir().unwrap();
+    let mut spawn = crashing.spawn(&["--dump-extension-api-with-docs"]);
+    spawn.cwd = Some(out.path().to_owned());
+    assert!(
+        !process::run(&spawn, Duration::from_secs(5))
+            .unwrap()
+            .success()
+    );
+    assert!(!out.path().join("extension_api.json").exists());
+}
+
+#[test]
+fn gdscript_docs_write_configured_files_and_an_unresolvable_uid_main_scene_aborts() {
+    let fake = Fake::new(json!({
+        "--gdscript-docs": {"files": {"Player.xml": "<class name=\"Player\"/>"}},
+    }));
+    let project = fake.dir.path().to_str().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let docs = out.path().to_str().unwrap();
+    let args = [
+        "--headless",
+        "--path",
+        project,
+        "--doctool",
+        docs,
+        "--gdscript-docs",
+        "res://",
+    ];
+    let documented = fake.run(&args);
+    assert!(documented.success(), "{}", stderr(&documented));
+    assert!(out.path().join("Player.xml").is_file());
+    assert!(
+        !out.path().join("modules").exists(),
+        "no engine defaults for script docs"
+    );
+
+    fs::write(
+        fake.dir.path().join("project.godot"),
+        "config_version=5\n[application]\nrun/main_scene=\"uid://abc\"\n",
+    )
+    .unwrap();
+    let aborted = fake.run(&args);
+    assert_eq!(aborted.status.unwrap().code(), Some(1));
+    assert!(stderr(&aborted).contains("Main scene's path could not be resolved from UID"));
+    let mut named = args.to_vec();
+    named.push("res://placeholder.tscn");
+    assert!(fake.run(&named).success());
+    fs::create_dir_all(fake.dir.path().join(".godot")).unwrap();
+    fs::write(fake.dir.path().join(".godot/uid_cache.bin"), "").unwrap();
+    assert!(fake.run(&args).success());
+}

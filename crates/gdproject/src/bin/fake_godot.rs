@@ -5,7 +5,9 @@
 //! missing sidecar means `{}`. There are deliberately no environment overrides:
 //! tests copy the executable per test, and an inherited variable must never
 //! change what a test observes.
-//! Keys are `help`, `probe`, `--import`, `import_scan`, `check`, and
+//! Keys are `help`, `probe`, `--import`, `import_scan`, `check`,
+//! `--dump-extension-api-with-docs`, `--doctool`, `--gdscript-docs` (a
+//! `--doctool` run that also has `--gdscript-docs`), and
 //! `script_bootstrap:<res://path>`, with fallback to `script_bootstrap`.
 //! Selection uses flags before `--`, the `--script` filename stem, and the first
 //! user argument after `--` for the bootstrap target. Unknown commands fail.
@@ -20,6 +22,14 @@
 //!   message="fake engine error". Ignored in modes without an envelope.
 //! - `class_cache`: exact string written by a normal (`envelope`) `--import` or
 //!   `import_scan` to `<--path>/.godot/global_script_class_cache.cfg`.
+//! - `files`: `{relative path: contents}` written by a normal dump or doctool
+//!   run into its output directory, replacing the defaults below.
+//!
+//! Dump and doctool (`envelope` mode, no envelope printed): the dump writes
+//! `extension_api.json` into the working directory, by default a minimal valid
+//! dump for version 4.7.2.stable.fake. `--doctool <dir>` writes into `<dir>`, by
+//! default `modules/gdscript/doc_classes/@GDScript.xml` declaring only `range`.
+//! `--gdscript-docs` writes only configured `files` into the `--doctool` directory.
 //!
 //! `envelope` emits `GDKIT_RESULT:` protocol v1 for harnesses, except bootstrap:
 //! bootstrap emits exactly `GDKIT_SCRIPT_STARTED\n`, BEFORE configured output,
@@ -80,6 +90,16 @@
 //! - `script_bootstrap` requires exactly one user argument: otherwise an
 //!   `arguments` error envelope, exit 2, with no startup marker or configured
 //!   output.
+//! - `--doctool <dir>` requires `<dir>` to exist: otherwise it prints Godot's
+//!   `ERROR: Argument supplied to --doctool must be a valid directory path.` and exits 1.
+//! - Under `--path`, a project whose `run/main_scene` is a `uid://` aborts like
+//!   Godot when no scene is named on the command line (a positional `res://…`
+//!   argument) and `.godot/uid_cache.bin` is missing: it prints `ERROR: Main
+//!   scene's path could not be resolved from UID. …` and exits 1. Applies to
+//!   `--doctool` runs.
+//! - `--dump-extension-api-with-docs` under `--path` behaves like Godot 4.7.2:
+//!   it writes the dump into the `--path` directory, prints
+//!   `ERROR: Parameter "singleton" is null.`, and exits 134.
 //!
 //! Every invocation appends one JSON array of argv (excluding argv[0]) to
 //! `<current_executable>.log`.
@@ -123,6 +143,56 @@ struct Scenario {
     #[serde(deserialize_with = "payload_value")]
     payload: Option<Value>,
     class_cache: Option<String>,
+    files: Option<BTreeMap<String, String>>,
+}
+
+const DEFAULT_DUMP: &str = r#"{"header":{"version_major":4,"version_minor":7,"version_patch":2,"version_status":"stable","version_build":"fake","version_full_name":"Godot Engine v4.7.2.stable.fake","precision":"single"},"global_constants":[],"global_enums":[],"utility_functions":[],"builtin_classes":[],"classes":[],"singletons":[]}"#;
+
+const DEFAULT_GDSCRIPT_DOC: &str = r#"<?xml version="1.0" encoding="UTF-8" ?>
+<class name="@GDScript">
+	<methods>
+		<method name="range" qualifiers="vararg">
+			<return type="Array" />
+		</method>
+	</methods>
+</class>
+"#;
+
+/// A `uid://` main scene, no scene named on the command line, and no UID cache.
+fn unresolvable_main_scene(project: &Path, flags: &[String]) -> Result<bool> {
+    let settings = match fs::read_to_string(project.join("project.godot")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    let uid_main_scene = settings
+        .lines()
+        .any(|line| line.trim_start().starts_with("run/main_scene=\"uid://"));
+    let values = ["--path", "--doctool", "--gdscript-docs"];
+    let named_scene = flags.iter().enumerate().any(|(at, arg)| {
+        arg.starts_with("res://") && at > 0 && !values.contains(&flags[at - 1].as_str())
+    });
+    Ok(uid_main_scene && !named_scene && !project.join(".godot/uid_cache.bin").is_file())
+}
+
+/// Writes `configured` (or `defaults`) under `directory`.
+fn write_outputs(
+    directory: &Path,
+    configured: Option<&BTreeMap<String, String>>,
+    defaults: &[(&str, &str)],
+) -> Result<()> {
+    let defaults: BTreeMap<String, String> = defaults
+        .iter()
+        .map(|(name, text)| ((*name).to_owned(), (*text).to_owned()))
+        .collect();
+    for (name, text) in configured.unwrap_or(&defaults) {
+        let path = directory.join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, text)?;
+    }
+    Ok(())
 }
 
 fn payload_value<'de, D: serde::Deserializer<'de>>(
@@ -455,10 +525,18 @@ fn run() -> Result<u8> {
         "help"
     } else if flags.iter().any(|a| a == "--import") {
         "--import"
+    } else if flags.iter().any(|a| a == "--dump-extension-api-with-docs") {
+        "--dump-extension-api-with-docs"
+    } else if flags.iter().any(|a| a == "--doctool") {
+        if flags.iter().any(|a| a == "--gdscript-docs") {
+            "--gdscript-docs"
+        } else {
+            "--doctool"
+        }
     } else {
         match script {
             Some(name @ ("probe" | "import_scan" | "check" | "script_bootstrap")) => name,
-            _ => return Err("unsupported invocation (expected --help, --import, or a supported --script harness)".into()),
+            _ => return Err("unsupported invocation (expected --help, --import, a dump, --doctool, or a supported --script harness)".into()),
         }
     };
     let text = match fs::read_to_string(sidecar(&executable, ".scenario.json")) {
@@ -470,7 +548,15 @@ fn run() -> Result<u8> {
     for key in scenarios.keys() {
         if !matches!(
             key.as_str(),
-            "help" | "probe" | "--import" | "import_scan" | "check" | "script_bootstrap"
+            "help"
+                | "probe"
+                | "--import"
+                | "import_scan"
+                | "check"
+                | "script_bootstrap"
+                | "--dump-extension-api-with-docs"
+                | "--doctool"
+                | "--gdscript-docs"
         ) && !key.starts_with("script_bootstrap:res://")
         {
             return Err(format!("unsupported scenario key: {key}").into());
@@ -523,6 +609,44 @@ fn run() -> Result<u8> {
         0
     };
     match mode {
+        Mode::Envelope if harness == "--dump-extension-api-with-docs" => {
+            let defaults = [("extension_api.json", DEFAULT_DUMP)];
+            if option(flags, "--path").is_some() {
+                write_outputs(project, scenario.files.as_ref(), &defaults)?;
+                writeln!(stderr, "ERROR: Parameter \"singleton\" is null.")?;
+                stderr.flush()?;
+                return Ok(134);
+            }
+            write_outputs(&env::current_dir()?, scenario.files.as_ref(), &defaults)?;
+        }
+        Mode::Envelope if harness == "--doctool" || harness == "--gdscript-docs" => {
+            let directory = option(flags, "--doctool").ok_or("--doctool requires a path")?;
+            if option(flags, "--path").is_some() && unresolvable_main_scene(project, flags)? {
+                writeln!(
+                    stderr,
+                    "ERROR: Main scene's path could not be resolved from UID. Make sure the project is imported first. Aborting."
+                )?;
+                stderr.flush()?;
+                return Ok(1);
+            }
+            if !Path::new(directory).is_dir() {
+                writeln!(
+                    stderr,
+                    "ERROR: Argument supplied to --doctool must be a valid directory path."
+                )?;
+                stderr.flush()?;
+                return Ok(1);
+            }
+            let defaults: &[(&str, &str)] = if harness == "--doctool" {
+                &[(
+                    "modules/gdscript/doc_classes/@GDScript.xml",
+                    DEFAULT_GDSCRIPT_DOC,
+                )]
+            } else {
+                &[]
+            };
+            write_outputs(Path::new(directory), scenario.files.as_ref(), defaults)?;
+        }
         Mode::Envelope => {
             let contract = invocation_contract(harness, flags, project);
             // Without --editor there is no editor filesystem scan to write a cache.

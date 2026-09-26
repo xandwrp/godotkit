@@ -215,6 +215,33 @@ fn run_engine_is_the_raw_form_used_for_import_dump_and_run() {
     assert!(fixture.args().contains(&"--import".into()));
 }
 
+#[test]
+fn run_projectless_omits_path_and_runs_in_the_given_directory() {
+    let fixture = Fixture::new("pwd > \"$ARGS.cwd\"; printf 'dumped\\n'");
+    let working = tempfile::tempdir().unwrap();
+    let mut invocation = fixture.invocation();
+    invocation.project_dir = working.path();
+    invocation.engine_args = vec!["--dump-extension-api-with-docs".into()];
+    invocation.user_args.push("ignored".into());
+    let (captured, diagnostics) = runner::run_projectless(&invocation).unwrap();
+    assert!(captured.success());
+    assert_eq!(captured.stdout(), b"dumped\n");
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        fixture.args(),
+        [
+            "--headless",
+            "--no-header",
+            "--dump-extension-api-with-docs"
+        ]
+    );
+    let cwd = fs::read_to_string(fixture.dir.path().join("args.cwd")).unwrap();
+    assert_eq!(
+        fs::canonicalize(cwd.trim()).unwrap(),
+        fs::canonicalize(working.path()).unwrap()
+    );
+}
+
 #[derive(Debug)]
 struct IntentionalUnwind;
 

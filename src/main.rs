@@ -21,6 +21,7 @@
 //! - `init_writes_config_and_refuses_to_overwrite` (via fake-godot)
 //! - `init_without_godot_follows_the_global_default` (via fake-godot)
 //! - `config_set_get_unset_list_round_trip` (via fake-godot)
+//! - `api_exit_codes_follow_the_answer_and_json_is_one_document` (via fake-godot)
 //! - `status_table_matches_what_each_command_does`
 //! - `help_tags_every_command_that_is_not_ready`
 

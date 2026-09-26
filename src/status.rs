@@ -19,7 +19,7 @@ pub enum Status {
 
 pub fn of(path: &str) -> Status {
     match path {
-        "check" | "init" | "config get" | "config set" | "config unset" | "config list" => {
+        "check" | "init" | "api" | "config get" | "config set" | "config unset" | "config list" => {
             Status::Ready
         }
         _ => Status::Stub,

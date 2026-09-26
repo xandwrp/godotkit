@@ -45,6 +45,7 @@ blake3 = "1.8"
 toml = "0.8"
 toml_edit = "0.22"
 ignore = "0.4"
+quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }
 anstream = "1"
 unicode-ident = "1"

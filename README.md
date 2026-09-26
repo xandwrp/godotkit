@@ -12,7 +12,10 @@ API-cache diagnostic enrichment remains deferred.
 
 Also landed: `config` keeps machine-wide defaults (`gdkit config set godot <path>`),
 and `init` writes a `gdkit.toml` that follows that default or, with `--godot`,
-pins the project's own engine.
+pins the project's own engine. `api` answers class, member, global, and search
+queries from the configured editor's own API dump, class reference, and
+`--gdscript-docs` output for the project's scripts, cached per engine and script
+content; project GDExtension classes are not covered yet.
 
 Exit codes: `0` passed, `1` failed or incomplete (including check-phase timeouts),
 `2` tool/startup, engine-probe, or configuration errors. A baseline permits engine
