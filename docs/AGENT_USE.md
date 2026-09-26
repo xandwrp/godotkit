@@ -168,10 +168,27 @@ only in an imported project; when one does not, the error says how to import.
 Engine output while loading (often from the project's autoloads, which Godot
 runs for any script) is in `engine_diagnostics` and does not fail the command.
 
-`create` assigns every property in the engine, saves, reloads with the cache
-disabled, and echoes each value back. Any divergence is exit `2` with the
-offending `field` and `stage`, and nothing is written. It never overwrites an
-existing file. The agent gets a resource that is right or gets nothing.
+A spec is one resource object, the shape a nested `$resource` takes:
+
+```json
+{"script": "res://resources/weapon_definition.gd",
+ "properties": {"damage": 12, "kind": 5, "tags": ["spread"],
+                "offset": {"$variant": {"type": "Vector3", "value": [0, 0.5, 0]}},
+                "ammo": {"$resource": {"script": "res://resources/ammo.gd", "properties": {"count": 8}}},
+                "icon": {"$ref": "res://icons/shotgun.png"}}}
+```
+
+`create` assigns every property in the engine, reading each value as the
+field's declared type (plain arrays and objects fill typed ones, `3` fills a
+float, a string fills a StringName), saves, reloads with the cache disabled,
+and echoes each value back. Any divergence is exit `2` with the offending
+`field` and `stage`, and nothing is written: an enum written as its name, a
+setter that changes the value, a float the engine stores differently (`0.1` in
+a 32-bit `Vector2` is `0.10000000149011612`; the error names the stored value),
+or `-0.0`, which `.tres` text cannot keep. `--out` must name a new `.tres` in
+an existing directory; it never overwrites a file and never creates a
+directory. The report lists each property as the engine stored it. The agent
+gets a resource that is right or gets nothing.
 
 ## 4. `scene-tree --expand`: read a scene in one screen
 

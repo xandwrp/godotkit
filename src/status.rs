@@ -34,7 +34,8 @@ pub fn of(path: &str) -> Status {
         | "settings window"
         | "settings main-scene"
         | "settings get"
-        | "resource schema" => Status::Ready,
+        | "resource schema"
+        | "resource create" => Status::Ready,
         _ => Status::Stub,
     }
 }

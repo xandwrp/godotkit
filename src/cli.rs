@@ -207,9 +207,17 @@ pub enum ResourceCommand {
     Create {
         #[command(flatten)]
         project: ProjectArgs,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "JSON spec: {\"class\"|\"script\": …, \"properties\": {…}} (see `resource schema`)"
+        )]
         spec: PathBuf,
-        #[arg(long, value_name = "RES")]
+        #[arg(
+            long,
+            value_name = "RES",
+            help = "New .tres to write: res://…, or a path inside the project; never overwritten"
+        )]
         out: String,
     },
 }

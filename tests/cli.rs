@@ -1658,3 +1658,89 @@ fn resource_schema_json_is_one_document_and_target_errors_exit_2() {
         "error: harness resource_schema failed at target (class): Node is not a Resource\n"
     );
 }
+
+#[test]
+fn resource_create_publishes_a_verified_file_and_every_failure_exits_2() {
+    let fake = Fake::new(serde_json::json!({}));
+    let dir = project(&[("weapon.gd", "extends Resource\n"), ("weapons/.keep", "")]);
+    let spec = dir.path().join("shotgun.json");
+    fs::write(
+        &spec,
+        r#"{"script": "res://weapon.gd", "properties": {"damage": 3, "offset": {"$variant": {"type": "Vector2", "value": [1, 2.5]}}}}"#,
+    )
+    .unwrap();
+    let create = |fake: &Fake, spec: &Path, out: &str, json: bool| {
+        let mut command = fake.gdkit();
+        command
+            .args(["resource", "create", "--project"])
+            .arg(dir.path())
+            .arg("--spec")
+            .arg(spec)
+            .args(["--out", out])
+            .env("GDKIT_GODOT", &fake.executable);
+        if json {
+            command.args(["--output", "json"]);
+        }
+        command.output().unwrap()
+    };
+
+    let report = succeeded(&create(&fake, &spec, "res://weapons/shotgun.tres", true));
+    assert_eq!(report["path"], "res://weapons/shotgun.tres");
+    assert_eq!(
+        report["target"],
+        serde_json::json!({"script": "res://weapon.gd"})
+    );
+    assert_eq!(report["properties_written"], 2);
+    assert_eq!(report["properties"]["damage"], 3);
+    assert!(dir.path().join("weapons/shotgun.tres").is_file());
+
+    let human = create(&fake, &spec, "weapons/rifle.tres", false);
+    assert_eq!(human.status.code(), Some(0));
+    let stdout = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        stdout.starts_with(
+            "created res://weapons/rifle.tres (res://weapon.gd, 2 properties)\n  damage  = 3\n"
+        ),
+        "{stdout}"
+    );
+
+    // Offline failures exit 2 before any engine run and write nothing.
+    fake.take_log();
+    let missing = dir.path().join("missing.json");
+    let not_json = dir.path().join("not.json");
+    fs::write(&not_json, "{").unwrap();
+    let bad_spec = dir.path().join("bad.json");
+    fs::write(&bad_spec, r#"{"script": "res://weapon.gd", "properties": {"offset": {"$variant": {"type": "Vector2", "value": [1]}}}}"#).unwrap();
+    let gone = dir.path().join("gone.json");
+    fs::write(&gone, r#"{"script": "res://gone.gd"}"#).unwrap();
+    for (spec, out, expected) in [
+        (&missing, "res://weapons/a.tres", "missing.json"),
+        (&not_json, "res://weapons/a.tres", "not JSON"),
+        (&bad_spec, "res://weapons/a.tres", "at /properties/offset"),
+        (
+            &spec,
+            "res://weapons/shotgun.tres",
+            "already exists; gdkit never overwrites",
+        ),
+        (&spec, "res://armor/a.tres", "res://armor does not exist"),
+        (&spec, "res://weapons/a.res", "must name a .tres file"),
+        (&gone, "res://weapons/a.tres", "do not exist: res://gone.gd"),
+    ] {
+        let stderr = tool_error(&create(&fake, spec, out, true));
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+    assert_eq!(fake.take_log(), "", "no engine run");
+
+    // A verify failure names the field; nothing is published or left staged.
+    let lossy = Fake::new(serde_json::json!({"resource_create": {"payload": {"echo": {
+        "damage": 3, "offset": {"$variant": {"type": "Vector2", "value": [1.0, 2.0]}},
+    }}}}));
+    let entries = || fs::read_dir(dir.path().join("weapons")).unwrap().count();
+    let before = entries();
+    let stderr = tool_error(&create(&lossy, &spec, "res://weapons/lossy.tres", true));
+    assert_eq!(
+        stderr,
+        "error: harness resource_create failed at verify (properties.offset[1]): the engine stored 2.0 where the spec has 2.5\n"
+    );
+    assert_eq!(entries(), before);
+}
