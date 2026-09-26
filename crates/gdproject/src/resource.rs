@@ -23,7 +23,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gdview::ResPath;
-use gdview::variant::{ResourceTarget, VariantJson, VariantType};
+pub use gdview::property::FieldSchema;
+use gdview::variant::{ResourceTarget, VariantJson};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::Engine;
@@ -67,21 +68,6 @@ pub struct ResourceSchema {
     pub schema_version: u32,
     pub target: ResourceTarget,
     pub fields: Vec<FieldSchema>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FieldSchema {
-    pub name: String,
-    pub variant_type: VariantType,
-    pub class_name: Option<String>,
-    pub element_type: Option<VariantType>,
-    pub default: serde_json::Value,
-    pub hint: Option<String>,
-    pub hint_string: Option<String>,
-    pub enum_choices: Vec<String>,
-    pub stored: bool,
-    /// Accepted spec shapes for this field, as documentation for generators.
-    pub accepts: Vec<String>,
 }
 
 pub fn schema(

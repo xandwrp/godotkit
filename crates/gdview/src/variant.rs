@@ -291,6 +291,12 @@ impl VariantType {
         Self::ALL.get(usize::try_from(code).ok()?).copied()
     }
 
+    /// Component count of a fixed-size tagged payload (vectors, colors, rects,
+    /// transforms, …) and whether its components are integers.
+    pub fn components(self) -> Option<(usize, bool)> {
+        self.tuple().map(|(count, kind)| (count, kind == Kind::I32))
+    }
+
     /// Tuple payload shape: component count and component kind.
     fn tuple(self) -> Option<(usize, Kind)> {
         use VariantType::*;
