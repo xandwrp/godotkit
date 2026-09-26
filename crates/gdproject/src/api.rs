@@ -40,14 +40,16 @@ use std::time::{Duration, Instant};
 use gdview::api::{API_INDEX_SCHEMA_VERSION, ApiIndex, doc_xml};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::Engine;
+use crate::engine::{CacheHealth, Engine};
 use crate::process::Captured;
 use crate::runner::{self, Invocation};
 use crate::workspace::{API_CACHE_FILE, IsolatedCopy, Workspace};
 
 mod project;
 
-pub use project::{ScriptDocs, ScriptDocsSource, ScriptFallback, load_scripts};
+pub use project::{
+    ScriptDocs, ScriptDocsSource, ScriptFallback, load_scripts, scripts_cache_health,
+};
 
 /// For both engine runs together.
 pub const DEFAULT_DUMP_DEADLINE: Duration = Duration::from_secs(120);
@@ -98,6 +100,29 @@ pub fn load_native(
     })?;
     workspace.replace_state_file(API_CACHE_FILE, &bytes)?;
     Ok((index, CacheUse::Miss))
+}
+
+/// Whether [`load_native`] would hit its cache for `engine`, without loading it.
+/// Reads only the key, so an index body that no longer parses still counts as current.
+pub fn native_cache_health(workspace: &Workspace, engine: &Engine) -> CacheHealth {
+    #[derive(Deserialize)]
+    struct KeyOnly {
+        key: CacheKey,
+    }
+    let key = CacheKey {
+        engine_fingerprint: engine.fingerprint.clone(),
+        schema_version: API_INDEX_SCHEMA_VERSION,
+    };
+    let bytes = match std::fs::read(workspace.api_cache_path()) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return CacheHealth::Missing,
+        Err(_) => return CacheHealth::Unreadable,
+    };
+    match serde_json::from_slice::<KeyOnly>(&bytes) {
+        Ok(record) if record.key == key => CacheHealth::Current,
+        Ok(_) => CacheHealth::Stale,
+        Err(_) => CacheHealth::Malformed,
+    }
 }
 
 /// A fresh dump with no cache, for `api --dump` outside a project.

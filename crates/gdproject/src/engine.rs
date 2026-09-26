@@ -52,9 +52,11 @@ pub struct TrackedFile {
     pub changed_unix_ns: Option<i128>,
 }
 
+/// A state file's condition before use: the probe cache here, the API caches in
+/// [`crate::api`]. Only `Current` is used as is; everything else is a miss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProbeCacheHealth {
+pub enum CacheHealth {
     Missing,
     Current,
     Stale,
@@ -66,7 +68,7 @@ pub const DEFAULT_PROBE_DEADLINE: Duration = Duration::from_secs(60);
 
 impl Engine {
     /// Uses the cached probe when the key matches, otherwise runs [`probe`] and caches.
-    /// Returns whether the cache was hit so `doctor` can say so.
+    /// Returns whether the cache was hit, so `doctor` can say so.
     pub fn attach(
         selection: &EngineSelection,
         workspace: &Workspace,
@@ -110,15 +112,15 @@ struct ProbeCache {
     report: ProbeReport,
 }
 
-fn read_cache(workspace: &Workspace) -> Result<ProbeCache, ProbeCacheHealth> {
+fn read_cache(workspace: &Workspace) -> Result<ProbeCache, CacheHealth> {
     let bytes = fs::read(workspace.probe_cache_path()).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            ProbeCacheHealth::Missing
+            CacheHealth::Missing
         } else {
-            ProbeCacheHealth::Unreadable
+            CacheHealth::Unreadable
         }
     })?;
-    serde_json::from_slice(&bytes).map_err(|_| ProbeCacheHealth::Malformed)
+    serde_json::from_slice(&bytes).map_err(|_| CacheHealth::Malformed)
 }
 
 fn key_for(executable: &Path) -> crate::Result<ProbeKey> {
@@ -211,17 +213,17 @@ pub fn probe_key(executable: &Path) -> std::io::Result<ProbeKey> {
     })
 }
 
-pub fn probe_cache_health(executable: &Path, workspace: &Workspace) -> ProbeCacheHealth {
+pub fn probe_cache_health(executable: &Path, workspace: &Workspace) -> CacheHealth {
     let record = match read_cache(workspace) {
         Ok(record) => record,
         Err(health) => return health,
     };
     if !record.report.compatible() {
-        return ProbeCacheHealth::Malformed;
+        return CacheHealth::Malformed;
     }
     match probe_key(executable) {
-        Ok(key) if key == record.key => ProbeCacheHealth::Current,
-        _ => ProbeCacheHealth::Stale,
+        Ok(key) if key == record.key => CacheHealth::Current,
+        _ => CacheHealth::Stale,
     }
 }
 

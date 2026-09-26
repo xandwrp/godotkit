@@ -273,15 +273,27 @@ existing `gdkit.toml`: edit the file instead.
 
 ```sh
 gdkit doctor
+gdkit doctor --output json
 ```
 
-Which engine will be used and why (`--godot`, `GDKIT_GODOT`, `gdkit.toml`, or
-the global default, in that order; a bare name such as `godot` is looked up on
-`PATH`, and an empty `GDKIT_GODOT` counts as unset),
-its version, whether the probe cache is warm, the project's warning policy,
-which sessions are recorded and whether any record is corrupt. Thirty seconds
-here saves the twenty minutes an agent otherwise spends debugging a wrong
-engine path through a failing `check`.
+Which engine will be used and why: every source that names one (`--godot`,
+`GDKIT_GODOT`, `gdkit.toml`, the global default, in that order; a bare name
+such as `godot` is looked up on `PATH`, and an empty `GDKIT_GODOT` counts as
+unset), which one won, and what it overrides. Then its version, whether the
+probe cache was warm (a cold one is probed and cached, as any engine command
+would), whether both config files load, the project's GDScript warning policy
+(`enable`, `directory_rules`, per-warning levels) and `strict_methods`, whether
+the API caches are current for this engine, and how many check runs are kept
+under `.godot/gdkit/artifacts/check`, with the newest.
+
+Anything that would stop an engine command from starting is listed under
+`problems`, each with a stable `code` (`project_config_invalid`,
+`global_config_invalid`, `no_engine`, `engine_not_found`, `probe_failed` with the
+engine's output, `warning_settings_invalid`, `state_unreadable`). Doctor keeps
+going past each one, so a single run shows everything. Exit `0` with no problems,
+`1` with any, `2` only outside a project. Thirty seconds here saves the twenty
+minutes an agent otherwise spends debugging a wrong engine path through a failing
+`check`.
 
 ## 8. `run`: execute to a checkpoint and stop
 

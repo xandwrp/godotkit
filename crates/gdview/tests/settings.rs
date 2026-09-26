@@ -4,7 +4,7 @@
 use gdview::ResPath;
 use gdview::autoload::AutoloadTarget;
 use gdview::respath::Uid;
-use gdview::settings::Settings;
+use gdview::settings::{DirectoryRuleMode, Settings, WarningPolicy};
 use gdview::uid::UidMap;
 
 const PROJECT: &str = r#"; Engine configuration file.
@@ -132,10 +132,110 @@ fn autoloads_preserve_declaration_order_and_singleton_marker() {
     );
 }
 
+fn rules(policy: &WarningPolicy) -> Vec<(&str, DirectoryRuleMode)> {
+    policy
+        .directory_rules
+        .iter()
+        .map(|rule| (rule.path.as_str(), rule.mode))
+        .collect()
+}
+
 #[test]
-#[ignore = "scaffold"]
 fn warnings_reports_defaults_when_keys_absent() {
-    todo!()
+    // Keys outside [debug], or merely sharing a suffix, do not count.
+    let settings =
+        Settings::parse("[other]\ngdscript/warnings/enable=false\n[debug]\nsettings/x=1\n")
+            .unwrap();
+    let policy = settings.warnings().unwrap();
+    assert!(policy.enabled);
+    assert_eq!(
+        rules(&policy),
+        [("res://addons", DirectoryRuleMode::Exclude)]
+    );
+    assert!(policy.overrides.is_empty());
+}
+
+// Each expectation was read back from Godot 4.7.2's ProjectSettings.
+#[test]
+fn warnings_read_directory_rules_and_migrate_exclude_addons_like_the_engine() {
+    use DirectoryRuleMode::{Exclude, Include};
+    let policy = |debug: &str| {
+        Settings::parse(&format!("config_version=5\n[debug]\n{debug}"))
+            .unwrap()
+            .warnings()
+            .unwrap()
+    };
+    let written = policy(
+        "gdscript/warnings/enable=false\ngdscript/warnings/directory_rules={\n\"res://addons\": 1,\n\"res://vendor\": 0\n}\ngdscript/warnings/unused_variable=2\ngdscript/warnings/unsafe_method_access=true\ngdscript/warnings/unused_variable=0\n",
+    );
+    assert!(!written.enabled);
+    assert_eq!(
+        rules(&written),
+        [("res://addons", Include), ("res://vendor", Exclude)]
+    );
+    assert_eq!(
+        written.overrides,
+        [
+            ("unsafe_method_access".to_owned(), "true".to_owned()),
+            ("unused_variable".to_owned(), "0".to_owned()),
+        ]
+        .into()
+    );
+    assert_eq!(
+        rules(&policy("gdscript/warnings/exclude_addons=false\n")),
+        [("res://addons", Include)]
+    );
+    assert_eq!(
+        rules(&policy("gdscript/warnings/exclude_addons=true\n")),
+        [("res://addons", Exclude)]
+    );
+    // The legacy key wins for res://addons and moves it first, in either order.
+    for debug in [
+        "gdscript/warnings/directory_rules={\n\"res://vendor\": 0,\n\"res://addons\": 0\n}\ngdscript/warnings/exclude_addons=false\n",
+        "gdscript/warnings/exclude_addons=false\ngdscript/warnings/directory_rules={\n\"res://vendor\": 0,\n\"res://addons\": 0\n}\n",
+    ] {
+        assert_eq!(
+            rules(&policy(debug)),
+            [("res://addons", Include), ("res://vendor", Exclude)],
+            "{debug}"
+        );
+    }
+    assert!(
+        policy("gdscript/warnings/directory_rules={}\n")
+            .directory_rules
+            .is_empty()
+    );
+    assert_eq!(
+        rules(&policy(
+            "gdscript/warnings/directory_rules={ \"res://a \\\"q\\\"\": 1 }\n"
+        )),
+        [("res://a \"q\"", Include)]
+    );
+}
+
+#[test]
+fn malformed_warning_settings_are_errors_naming_the_key() {
+    for (debug, key) in [
+        ("gdscript/warnings/enable=yes", "enable"),
+        ("gdscript/warnings/exclude_addons=1", "exclude_addons"),
+        (
+            "gdscript/warnings/directory_rules={\"res://a\": 2}",
+            "directory_rules",
+        ),
+        (
+            "gdscript/warnings/directory_rules={res://a: 0}",
+            "directory_rules",
+        ),
+        ("gdscript/warnings/directory_rules=[]", "directory_rules"),
+    ] {
+        let settings = Settings::parse(&format!("[debug]\n{debug}\n")).unwrap();
+        match settings.warnings() {
+            Err(gdview::Error::Setting { key: found, .. }) => {
+                assert_eq!(found, format!("debug/gdscript/warnings/{key}"), "{debug}")
+            }
+            other => panic!("{debug}: {other:?}"),
+        }
+    }
 }
 
 #[test]
