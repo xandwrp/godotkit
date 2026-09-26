@@ -43,7 +43,7 @@
 //! `staged_file_is_removed_on_every_failure_path`, `invalid_requests_fail_before_the_engine_runs`.
 //! Engine (`#[ignore]`): `real_engine_round_trips_every_variant_type` (moved from legacy resource_containers),
 //! `real_engine_schema_reports_fields_hints_enums_and_typed_arrays_from_hint_string`,
-//! `real_engine_create_nested_resources_and_refs`.
+//! `real_engine_create_nested_resources_and_refs`, `real_engine_create_writes_only_the_destination`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

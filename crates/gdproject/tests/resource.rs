@@ -939,14 +939,280 @@ fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     out
 }
 
-#[test]
-#[ignore = "scaffold"]
-fn real_engine_round_trips_every_variant_type() {
-    todo!()
+/// Everything under `root` except gdkit's own state (`.godot/gdkit`: lock, probe cache).
+fn project_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    snapshot(root)
+        .into_iter()
+        .filter(|(path, _)| !path.starts_with(".godot/gdkit"))
+        .collect()
+}
+
+/// GDScript's spelling of a value's declared type, or `None` for values a
+/// typed property cannot hold as written (null, resources).
+fn gdscript_type(value: &VariantJson) -> Option<String> {
+    Some(match value {
+        VariantJson::Nil | VariantJson::Ref(_) | VariantJson::Resource(_) => return None,
+        VariantJson::TypedArray { element, .. } => format!("Array[{}]", element.name()),
+        other => other.variant_type()?.name().to_owned(),
+    })
 }
 
 #[test]
-#[ignore = "scaffold"]
+#[ignore = "requires GDKIT_TEST_GODOT"]
+fn real_engine_round_trips_every_variant_type() {
+    // Every value the engine's own encoder produced for the golden fixture,
+    // assigned once to a Variant property (the .tres round trip alone) and
+    // once to a property of its own type (the harness's typed reading).
+    // Godot 4.7.2's .tres text writes -0.0 as 0 (floats, vector components,
+    // packed arrays), so those values cannot be saved and must be rejected.
+    let golden: Value =
+        serde_json::from_str(include_str!("fixtures/protocol_golden.json")).unwrap();
+    let (unsavable, values): (Vec<&Value>, Vec<&Value>) = golden["payload"]["encoded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .partition(|value| value.to_string().contains("-0.0"));
+    assert_eq!(unsavable.len(), 3);
+    let mut script = String::from("extends Resource\n");
+    let mut properties = serde_json::Map::new();
+    for (index, value) in values.into_iter().enumerate() {
+        script.push_str(&format!("@export var v{index}: Variant\n"));
+        properties.insert(format!("v{index}"), value.clone());
+        let decoded = VariantJson::from_json(value, &Limits::default()).unwrap();
+        if let Some(ty) = gdscript_type(&decoded) {
+            script.push_str(&format!("@export var t{index}: {ty}\n"));
+            properties.insert(format!("t{index}"), value.clone());
+        }
+    }
+    let engine = real_engine();
+    let (dir, workspace) = project(&[
+        ("values.gd", &script),
+        (
+            "probe.tres",
+            "[gd_resource type=\"Resource\" format=3]\n\n[resource]\nresource_name = \"probe\"\n",
+        ),
+        (
+            "scripted_resource.gd",
+            "extends Resource\n@export var answer := 42\n",
+        ),
+    ]);
+    let spec =
+        CreateSpec::from_json(&json!({"script": "res://values.gd", "properties": properties}))
+            .unwrap();
+    let out = ResPath::parse("res://values.tres").unwrap();
+    let report = resource::create(&workspace, &engine, &spec, &out, DEFAULT_DEADLINE)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(report.properties_written, properties.len());
+    for (name, value) in &properties {
+        let stored = &report.properties[name];
+        // Inline resources echo their defaults too, and a reload may reorder
+        // dictionary pairs; everything else comes back exactly as written.
+        let unordered = value.get("$resource").is_some()
+            || value.to_string().contains(r#""type":"Dictionary""#);
+        if unordered {
+            let [spec, echo] = [value, stored].map(|value| {
+                BTreeMap::from([(
+                    name.clone(),
+                    VariantJson::from_json(value, &Limits::default()).unwrap(),
+                )])
+            });
+            resource::verify_echo(&spec, &echo).unwrap();
+        } else {
+            assert_eq!(stored, value, "{name}");
+        }
+    }
+    assert!(dir.path().join("values.tres").is_file());
+
+    for value in unsavable {
+        let spec = CreateSpec::from_json(
+            &json!({"script": "res://values.gd", "properties": {"v0": value}}),
+        )
+        .unwrap();
+        let out = ResPath::parse("res://negative_zero.tres").unwrap();
+        match resource::create(&workspace, &engine, &spec, &out, DEFAULT_DEADLINE) {
+            Err(Error::Harness {
+                stage,
+                field,
+                message,
+                ..
+            }) => {
+                assert_eq!(
+                    (stage.as_str(), field.as_deref()),
+                    ("verify", Some("properties.v0"))
+                );
+                assert!(message.contains("sign of -0.0"), "{value}: {message}");
+            }
+            other => panic!("{value}: {other:?}"),
+        }
+        assert!(!dir.path().join("negative_zero.tres").exists());
+    }
+}
+
+const LOADOUT: &str = r#"class_name Loadout
+extends Resource
+enum Slot { PRIMARY, SIDEARM = 4 }
+@export var slot: Slot
+@export var weight: float
+@export var id: StringName
+@export var primary: AmmoDefinition
+@export var reserve: Array[AmmoDefinition] = []
+@export var by_name: Dictionary[StringName, AmmoDefinition] = {}
+@export var palette: Gradient
+@export var clamped: float = 0.0:
+	set(value):
+		clamped = clampf(value, 0.0, 1.0)
+"#;
+
+const GRADIENT: &str = "[gd_resource type=\"Gradient\" format=3]\n\n[resource]\noffsets = PackedFloat32Array(0, 0.5, 1)\ncolors = PackedColorArray(0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1)\n";
+
+/// The loadout project, imported so `class_name` scripts resolve.
+fn loadout_project(engine: &Engine) -> (tempfile::TempDir, Workspace) {
+    let (dir, workspace) = project(&[
+        ("loadout.gd", LOADOUT),
+        ("ammo.gd", AMMO),
+        ("palette.tres", GRADIENT),
+        ("gear/.keep", ""),
+    ]);
+    import(engine, dir.path());
+    (dir, workspace)
+}
+
+#[test]
+#[ignore = "requires GDKIT_TEST_GODOT"]
 fn real_engine_create_nested_resources_and_refs() {
-    todo!()
+    let engine = real_engine();
+    let (dir, workspace) = loadout_project(&engine);
+    let ammo = |count: i64| json!({"$resource": {"script": "res://ammo.gd", "properties": {"count": count}}});
+    let spec = CreateSpec::from_json(&json!({
+        "script": "res://loadout.gd",
+        "properties": {
+            "slot": 4,
+            "weight": 3,
+            "id": "rifle",
+            "primary": ammo(30),
+            "reserve": [ammo(10), ammo(20)],
+            "by_name": {"slugs": ammo(8)},
+            "palette": {"$ref": "res://palette.tres"},
+        },
+    }))
+    .unwrap();
+    let out = ResPath::parse("res://gear/rifle.tres").unwrap();
+    let report = resource::create(&workspace, &engine, &spec, &out, DEFAULT_DEADLINE)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        report.properties["weight"],
+        json!({"$variant": {"type": "float", "value": 3.0}})
+    );
+    assert_eq!(
+        report.properties["id"],
+        json!({"$variant": {"type": "StringName", "value": "rifle"}})
+    );
+    assert_eq!(
+        report.properties["palette"],
+        json!({"$ref": "res://palette.tres"})
+    );
+    assert_eq!(
+        report.properties["reserve"][1]["$resource"]["properties"]["count"],
+        json!(20)
+    );
+    let text = fs::read_to_string(dir.path().join("gear/rifle.tres")).unwrap();
+    assert!(text.contains("path=\"res://palette.tres\""), "{text}");
+    assert!(
+        text.contains("reserve = Array[ExtResource("),
+        "typed by script:\n{text}"
+    );
+    assert!(
+        text.contains("by_name = Dictionary[StringName, ExtResource("),
+        "{text}"
+    );
+    assert_eq!(text.matches("[sub_resource").count(), 4, "{text}");
+
+    // Each rejection names its field and leaves the project as it was.
+    let before = project_files(dir.path());
+    for (properties, stage, field, expected) in [
+        (
+            json!({"slot": "SIDEARM"}),
+            "assign",
+            "properties.slot",
+            "write the enum's value",
+        ),
+        (
+            json!({"clamped": 5}),
+            "assign",
+            "properties.clamped",
+            "a setter or type rejected it",
+        ),
+        (
+            json!({"primary": {"$resource": {"class": "Curve"}}}),
+            "assign",
+            "properties.primary",
+            "Expected AmmoDefinition, got Curve",
+        ),
+        (
+            json!({"reserve": [ammo(1), {"$ref": "res://palette.tres"}]}),
+            "assign",
+            "properties.reserve[1]",
+            "Expected AmmoDefinition",
+        ),
+        (
+            json!({"primary": {"$resource": {"script": "res://ammo.gd", "properties": {"calibre": 9}}}}),
+            "assign",
+            "properties.primary.properties.calibre",
+            "no stored property `calibre`",
+        ),
+        (
+            json!({"weight": 0.1, "palette": {"$resource": {"class": "Gradient", "properties": {"offsets": {"$variant": {"type": "PackedFloat32Array", "value": [0.1]}}}}}}),
+            "verify",
+            "properties.palette.properties.offsets[0]",
+            "the engine stored 0.10000000149011612 where the spec has 0.1",
+        ),
+    ] {
+        let spec =
+            CreateSpec::from_json(&json!({"script": "res://loadout.gd", "properties": properties}))
+                .unwrap();
+        let out = ResPath::parse("res://gear/rejected.tres").unwrap();
+        match resource::create(&workspace, &engine, &spec, &out, DEFAULT_DEADLINE) {
+            Err(Error::Harness {
+                stage: got_stage,
+                field: got_field,
+                message,
+                ..
+            }) => {
+                assert_eq!(
+                    (got_stage.as_str(), got_field.as_deref()),
+                    (stage, Some(field)),
+                    "{message}"
+                );
+                assert!(message.contains(expected), "{field}: {message}");
+            }
+            other => panic!("{properties}: {other:?}"),
+        }
+        assert_eq!(project_files(dir.path()), before, "{properties}");
+    }
+}
+
+#[test]
+#[ignore = "requires GDKIT_TEST_GODOT"]
+fn real_engine_create_writes_only_the_destination() {
+    let engine = real_engine();
+    let (dir, workspace) = loadout_project(&engine);
+    let before = project_files(dir.path());
+    let spec =
+        CreateSpec::from_json(&json!({"script": "res://ammo.gd", "properties": {"count": 12}}))
+            .unwrap();
+    let out = ResPath::parse("res://gear/box.tres").unwrap();
+    resource::create(&workspace, &engine, &spec, &out, DEFAULT_DEADLINE).unwrap();
+    let mut after = project_files(dir.path());
+    let published = after
+        .iter()
+        .position(|(path, _)| path == Path::new("gear/box.tres"))
+        .expect("published");
+    let (_, bytes) = after.remove(published);
+    assert_eq!(after, before, "nothing else in the project changed");
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(
+        text.starts_with("[gd_resource type=\"Resource\" script_class=\"AmmoDefinition\""),
+        "{text}"
+    );
+    assert!(text.contains("count = 12"), "{text}");
 }
