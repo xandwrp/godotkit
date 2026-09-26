@@ -61,7 +61,8 @@
 //! count: `.gd` = scripts, `.tscn`/`.scn` = scenes, all other eligible paths =
 //! resources. Duplicates count separately; missing files remain eligible.
 //! ResourceSchema takes exactly `class <Name>` or `script <res://path>`; its
-//! payload is {"properties":[]}. ResourceCreate takes exactly a spec filename
+//! payload is {"class":<Name> (or "Resource" for a script),"script_class":null,
+//! "properties":[]}. ResourceCreate takes exactly a spec filename
 //! (a JSON object) and the staged `res://` path; its payload is
 //! {"echo": <the spec's "properties", or {}>}, echoing the spec verbatim.
 //!
@@ -293,7 +294,11 @@ fn default_payload(
     }
     if harness == "resource_schema" {
         return match user_args {
-            [kind, _] if kind == "class" || kind == "script" => Ok(json!({"properties": []})),
+            [kind, name] if kind == "class" || kind == "script" => Ok(json!({
+                "class": if kind == "class" { name.as_str() } else { "Resource" },
+                "script_class": null,
+                "properties": [],
+            })),
             _ => Err(input_error(
                 "arguments",
                 None,

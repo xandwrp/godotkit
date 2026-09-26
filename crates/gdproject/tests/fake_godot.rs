@@ -540,10 +540,16 @@ fn resource_harnesses_validate_arguments_echo_the_spec_and_write_the_staged_file
             None,
         );
     }
-    for args in [vec!["class", "Resource"], vec!["script", "res://weapon.gd"]] {
+    for (args, class) in [
+        (["class", "Curve"], "Curve"),
+        (["script", "res://weapon.gd"], "Resource"),
+    ] {
         let schema = fake.harness("resource_schema.gd", &args);
         assert!(schema.success());
-        assert_eq!(envelope(&schema).payload, Some(json!({"properties": []})));
+        assert_eq!(
+            envelope(&schema).payload,
+            Some(json!({"class": class, "script_class": null, "properties": []}))
+        );
     }
 
     let staged = fake.dir.path().join(".x.tres");
