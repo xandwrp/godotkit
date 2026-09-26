@@ -21,6 +21,7 @@
 //!   └─ workspace, engine                             (filesystem state, probe)
 //!        └─ runner                                   (one engine invocation)
 //!             └─ check, api, resource, cache, run    (operations; probe serves run)
+//!                  └─ doctor                          (reports on all of the above)
 //! ```
 
 pub mod api;
@@ -28,6 +29,7 @@ pub mod cache;
 pub mod check;
 pub mod config;
 pub mod diagnostics;
+pub mod doctor;
 pub mod engine;
 pub mod error;
 pub mod global;

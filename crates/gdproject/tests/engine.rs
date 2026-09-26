@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use gdproject::config::{EngineSelection, SelectionSource};
-use gdproject::engine::{Engine, ProbeCacheHealth, probe, probe_cache_health, probe_key};
+use gdproject::engine::{CacheHealth, Engine, probe, probe_cache_health, probe_key};
 use gdproject::workspace::Workspace;
 use serde_json::{Value, json};
 
@@ -104,7 +104,7 @@ fn attach_probes_once_then_hits_cache() {
     let mut f = Fixture::new();
     assert_eq!(
         probe_cache_health(&f.selection.executable, &f.workspace),
-        ProbeCacheHealth::Missing
+        CacheHealth::Missing
     );
     let (first, hit) = f.attach().unwrap();
     assert!(!hit);
@@ -112,7 +112,7 @@ fn attach_probes_once_then_hits_cache() {
     assert_eq!(first.fingerprint.len(), 64);
     assert_eq!(
         probe_cache_health(&f.selection.executable, &f.workspace),
-        ProbeCacheHealth::Current
+        CacheHealth::Current
     );
     f.selection.source = SelectionSource::Environment;
     let (second, hit) = f.attach().unwrap();
@@ -142,7 +142,7 @@ fn cache_misses_when_engine_size_or_mtime_or_harness_hash_changes() {
     drop(file);
     assert_eq!(
         probe_cache_health(&f.selection.executable, &f.workspace),
-        ProbeCacheHealth::Stale
+        CacheHealth::Stale
     );
     let (resized, hit) = f.attach().unwrap();
     assert!(!hit);
@@ -162,7 +162,7 @@ fn cache_misses_when_engine_size_or_mtime_or_harness_hash_changes() {
     f.write_cache(cache);
     assert_eq!(
         probe_cache_health(&f.selection.executable, &f.workspace),
-        ProbeCacheHealth::Stale
+        CacheHealth::Stale
     );
     assert!(!f.attach().unwrap().1);
     assert_eq!(f.calls().len(), 8);
@@ -189,7 +189,7 @@ fn cache_misses_when_engine_is_replaced_with_same_size_and_mtime() {
     );
     assert_eq!(
         probe_cache_health(&f.selection.executable, &f.workspace),
-        ProbeCacheHealth::Stale
+        CacheHealth::Stale
     );
     let (replaced, hit) = f.attach().unwrap();
     assert!(!hit);
@@ -373,7 +373,7 @@ fn cache_health_and_recovery() {
     fs::write(f.workspace.probe_cache_path(), b"not json").unwrap();
     assert_eq!(
         probe_cache_health(&f.selection.executable, &f.workspace),
-        ProbeCacheHealth::Malformed
+        CacheHealth::Malformed
     );
     assert!(!f.attach().unwrap().1);
     let mut invalid = f.cache();
@@ -381,14 +381,14 @@ fn cache_health_and_recovery() {
     f.write_cache(invalid);
     assert_eq!(
         probe_cache_health(&f.selection.executable, &f.workspace),
-        ProbeCacheHealth::Malformed
+        CacheHealth::Malformed
     );
     assert!(!f.attach().unwrap().1);
     fs::remove_file(f.workspace.probe_cache_path()).unwrap();
     fs::create_dir(f.workspace.probe_cache_path()).unwrap();
     assert_eq!(
         probe_cache_health(&f.selection.executable, &f.workspace),
-        ProbeCacheHealth::Unreadable
+        CacheHealth::Unreadable
     );
 }
 

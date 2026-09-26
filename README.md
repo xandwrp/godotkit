@@ -15,7 +15,9 @@ and `init` writes a `gdkit.toml` that follows that default or, with `--godot`,
 pins the project's own engine. `api` answers class, member, global, and search
 queries from the configured editor's own API dump, class reference, and
 `--gdscript-docs` output for the project's scripts, cached per engine and script
-content; project GDExtension classes are not covered yet.
+content; project GDExtension classes are not covered yet. `doctor` explains which
+engine a project resolves to and why, what it overrides, cache health, the
+warning policy, and anything that would stop an engine command from starting.
 
 Exit codes: `0` passed, `1` failed or incomplete (including check-phase timeouts),
 `2` tool/startup, engine-probe, or configuration errors. A baseline permits engine

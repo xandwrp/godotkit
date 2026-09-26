@@ -19,7 +19,7 @@ in the same change that implements the command.
 
 The command surface is exactly what [AGENT_USE.md](AGENT_USE.md) lists. Anything
 not on that page is not stubbed, on purpose. These flows describe the intended
-architecture: `check`, `api`, `init`, and `config` are implemented end to end, but other
+architecture: `check`, `api`, `init`, `config`, and `doctor` are implemented end to end, but other
 command scaffolds remain. Check's API-cache diagnostic enrichment is explicitly deferred.
 
 ## Rules that are enforced by structure, not discipline
@@ -115,6 +115,22 @@ config: GlobalConfig::locate (GDKIT_CONFIG_DIR > XDG_CONFIG_HOME/HOME > APPDATA)
         unset:    GlobalConfig::unset_engine → emit
 ```
 
+### `gdkit doctor`
+
+```
+gdkit::commands::doctor
+  1. ctx.workspace                        (outside a project: exit 2)
+  2. gdproject::doctor::diagnose          every step runs; a failure is a Problem, not an Err
+       a. Config::load, GlobalConfig::load            invalid → project_/global_config_invalid
+       b. candidates: flag, env (blank = unset), gdkit.toml, global, as written
+       c. select_engine                                → no_engine | engine_not_found
+       d. probe_cache_health, then Engine::attach      a miss probes and writes the cache → probe_failed (+ output tail)
+       e. api::native_cache_health (key only), api::scripts_cache_health (hashes scripts; nothing runs)
+       f. Settings::warnings                           enable, directory_rules (legacy exclude_addons migrated), levels
+       g. Workspace::artifact_runs("check")            count and newest
+  3. emit; Exit::Failed when problems is non-empty
+```
+
 `ctx.engine` and `ctx.standalone_engine` load the global config for every
 engine-backed command; it is the last source `config::select_engine` consults.
 
@@ -197,7 +213,7 @@ or Windows process-lifecycle guarantees.
 | --- | --- | --- |
 | gdview (all modules) | fixtures + strings; every test | syntax corpus (`GODOT_SOURCE`); `real_engine_refresh_api_fixtures` (trimmed dump + doctool XML) |
 | gdproject::process | `sleep`/`sh`/`cmd` subjects: deadline, tree kill, log streaming, guard drop | none |
-| gdproject::engine, runner, api, check, run | `fake-godot` with per-executable scenario/log sidecars; asserts exact argv, envelopes, timeouts, artifacts | `real_engine_*`: harness correctness, golden fixtures, the API dump, script docs leaving the project untouched |
+| gdproject::engine, runner, api, check, run, doctor | `fake-godot` with per-executable scenario/log sidecars; asserts exact argv, envelopes, timeouts, artifacts | `real_engine_*`: harness correctness, golden fixtures, the API dump, script docs leaving the project untouched |
 | gdproject::protocol, diagnostics, workspace, config, global | pure | `protocol_gd` golden refresh |
 | gdproject::resource, probe, cache | validation, echo mismatch, staging cleanup, fake TCP responder, lock | round-trip every Variant type; probe under script error |
 | gdkit | drives the binary; JSON purity, exit codes; engine tests build the fake helper once per run via offline Cargo into `target/tmp` (reused across runs; three-minute deadline) | none |

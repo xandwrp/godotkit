@@ -22,6 +22,9 @@ pub enum Error {
         line: usize,
         message: String,
     },
+    /// A `project.godot` value a typed getter cannot read, e.g. `debug/gdscript/warnings/enable`.
+    #[error("project.godot: {key}: {message}")]
+    Setting { key: String, message: String },
     #[error("scene {}: {message}", path.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "<input>".into()))]
     Scene {
         path: Option<PathBuf>,

@@ -130,6 +130,29 @@ impl Workspace {
             Err(std::fs::TryLockError::Error(e)) => Err(io_error(&path, e)),
         }
     }
+    /// Every `<state>/artifacts/<kind>/` run directory, oldest first. Names
+    /// are zero-padded, so name order is creation order. Empty when none exist.
+    pub fn artifact_runs(&self, kind: &str) -> Result<Vec<PathBuf>> {
+        let parent = self.state_dir.join("artifacts").join(kind);
+        let entries = match fs::read_dir(&parent) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(io_error(&parent, error)),
+        };
+        let mut runs = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| io_error(&parent, e))?;
+            if entry
+                .file_type()
+                .map_err(|e| io_error(&parent, e))?
+                .is_dir()
+            {
+                runs.push(entry.path());
+            }
+        }
+        runs.sort();
+        Ok(runs)
+    }
     /// New `<state>/artifacts/<kind>/<unix_ms>-<pid>-<n>/`.
     pub fn new_artifact_dir(&self, kind: &str) -> Result<ArtifactDir> {
         validate_relative(Path::new(kind), false)?;

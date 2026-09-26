@@ -42,7 +42,7 @@ use gdview::uid::UidMap;
 use serde::{Deserialize, Serialize};
 
 use crate::diagnostics::Diagnostic;
-use crate::engine::Engine;
+use crate::engine::{CacheHealth, Engine};
 use crate::runner::{self, Invocation};
 use crate::workspace::{API_SCRIPTS_CACHE_FILE, IsolatedCopy, Workspace};
 
@@ -155,6 +155,37 @@ pub fn load_scripts(
         cached: false,
     };
     Ok((classes, docs))
+}
+
+/// Whether [`load_scripts`] would hit its cache for `engine`, without running
+/// anything. `None` when the project has no scripts, which needs no cache.
+/// Hashes every script, as `load_scripts` does.
+pub fn scripts_cache_health(
+    workspace: &Workspace,
+    engine: &Engine,
+) -> crate::Result<Option<CacheHealth>> {
+    #[derive(Deserialize)]
+    struct KeyOnly {
+        key: String,
+    }
+    let declarations = declarations::index_project(workspace.project())?;
+    if declarations.scripts.is_empty() {
+        return Ok(None);
+    }
+    let imported = workspace.root().join(CLASS_CACHE).is_file();
+    let key = cache_key(workspace, engine, &declarations.scripts, imported)?;
+    let bytes = match std::fs::read(workspace.state_dir().join(API_SCRIPTS_CACHE_FILE)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some(CacheHealth::Missing));
+        }
+        Err(_) => return Ok(Some(CacheHealth::Unreadable)),
+    };
+    Ok(Some(match serde_json::from_slice::<KeyOnly>(&bytes) {
+        Ok(record) if record.key == key => CacheHealth::Current,
+        Ok(_) => CacheHealth::Stale,
+        Err(_) => CacheHealth::Malformed,
+    }))
 }
 
 /// Engine, index schema, whether the project is imported (and its class cache),

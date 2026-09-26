@@ -1355,3 +1355,67 @@ fn api_exit_codes_follow_the_answer_and_json_is_one_document() {
     assert!(index["classes"]["CharacterBody3D"].is_object());
     assert!(!outside.path().join(".godot").exists());
 }
+
+#[test]
+fn doctor_exits_1_on_problems_and_json_is_one_document() {
+    let fake = Fake::new(serde_json::json!({}));
+    let dir = project(&[]);
+    let doctor = |args: &[&str]| {
+        fake.gdkit()
+            .args(["doctor", "--project"])
+            .arg(dir.path())
+            .args(args)
+            .env("GDKIT_GODOT", &fake.executable)
+            .output()
+            .unwrap()
+    };
+
+    let healthy = succeeded(&doctor(&["--output", "json"]));
+    assert_eq!(healthy["problems"], serde_json::json!([]));
+    assert_eq!(healthy["engine"]["candidates"][0]["source"], "environment");
+    assert_eq!(
+        healthy["engine"]["attached"]["version"],
+        "4.7.2.stable.fake"
+    );
+    assert_eq!(healthy["engine"]["cache_hit"], false);
+
+    // Human mode: the report is on stdout, and no `engine:` line on stderr.
+    let human = doctor(&[]);
+    assert_eq!(human.status.code(), Some(0));
+    assert!(
+        human.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let stdout = String::from_utf8(human.stdout).unwrap();
+    assert!(stdout.contains("probe cache: current, used"), "{stdout}");
+    assert!(stdout.ends_with("problems  none\n"), "{stdout}");
+
+    // A broken gdkit.toml is reported, not fatal: exit 1, one JSON document.
+    fs::write(dir.path().join("gdkit.toml"), "[engine]\nexe = 1\n").unwrap();
+    let broken = doctor(&["--output", "json"]);
+    assert_eq!(broken.status.code(), Some(1));
+    assert!(
+        broken.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&broken.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&broken.stdout).unwrap();
+    assert_eq!(report["problems"][0]["code"], "project_config_invalid");
+    assert_eq!(report["engine"]["attached"]["version"], "4.7.2.stable.fake");
+    let human = String::from_utf8(doctor(&[]).stdout).unwrap();
+    assert!(
+        human.contains("unknown configuration key `engine.exe`"),
+        "{human}"
+    );
+
+    // Outside a project there is nothing to diagnose.
+    let outside = tempfile::tempdir().unwrap();
+    let output = fake
+        .gdkit()
+        .args(["doctor", "--project"])
+        .arg(outside.path())
+        .output()
+        .unwrap();
+    assert!(tool_error(&output).contains("not inside a Godot project"));
+}
