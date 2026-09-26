@@ -8,6 +8,7 @@
 //! - `run_harness_adds_editor_flag_only_when_requested`
 //! - `run_harness_decodes_envelope_and_attaches_diagnostics_and_captured_output`
 //! - `run_harness_maps_error_envelope_to_error_harness_with_stage`
+//! - `run_harness_error_keeps_the_field_and_names_it_in_the_message`
 //! - `run_harness_maps_missing_envelope_to_error_protocol`
 //! - `run_harness_enforces_deadline_and_reports_timeout_with_partial_output`
 //! - `run_engine_is_the_raw_form_used_for_import_dump_and_run`
@@ -265,6 +266,7 @@ fn decode_completion<T: DeserializeOwned>(
             harness: harness.name(),
             stage: error.stage,
             message: error.message,
+            field: error.field,
         });
     }
     if !captured.success() {
@@ -272,6 +274,7 @@ fn decode_completion<T: DeserializeOwned>(
             harness: harness.name(),
             stage: "exit".into(),
             message: format!("engine did not exit successfully: {:?}", captured.status),
+            field: None,
         });
     }
     Ok(envelope)

@@ -170,6 +170,33 @@ fn run_harness_maps_error_envelope_to_error_harness_with_stage() {
 }
 
 #[test]
+fn run_harness_error_keeps_the_field_and_names_it_in_the_message() {
+    let fixture = Fixture::new(
+        "printf '%s\\n' 'GDKIT_RESULT:{\"protocol\":1,\"harness\":\"resource_create\",\"ok\":false,\"error\":{\"stage\":\"verify\",\"message\":\"echo differs\",\"field\":\"properties.offset\"}}'\nexit 1",
+    );
+    let error = runner::run_harness::<Value>(&fixture.invocation(), Harness::ResourceCreate)
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, Error::Harness { stage, field: Some(field), .. } if stage == "verify" && field == "properties.offset"),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "harness resource_create failed at verify (properties.offset): echo differs"
+    );
+
+    let fixture = Fixture::new(
+        "printf '%s\\n' 'GDKIT_RESULT:{\"protocol\":1,\"harness\":\"check\",\"ok\":false,\"error\":{\"stage\":\"load\",\"message\":\"broken\"}}'\nexit 1",
+    );
+    let error = runner::run_harness::<Value>(&fixture.invocation(), Harness::Check)
+        .err()
+        .unwrap();
+    assert!(matches!(&error, Error::Harness { field: None, .. }));
+    assert_eq!(error.to_string(), "harness check failed at load: broken");
+}
+
+#[test]
 fn run_harness_maps_missing_envelope_to_error_protocol() {
     let fixture = Fixture::new("printf 'noise\\n'\nprintf 'ERROR: still retained\\n' >&2");
     let run = runner::run_harness_captured::<Value>(&fixture.invocation(), Harness::Check).unwrap();
