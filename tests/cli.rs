@@ -236,7 +236,7 @@ fn build_fake_binary() -> Result<std::path::PathBuf, String> {
     let file = |path: &Path| fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()));
     let mut child = Command::new(env!("CARGO"))
         .args(["build", "--offline", "--locked", "--manifest-path"])
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdproject/Cargo.toml"))
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/gdproject/Cargo.toml"))
         .args([
             "--features",
             "test-engine",

@@ -24,7 +24,7 @@ Job objects are out of scope, and Windows process-tree cleanup is not guaranteed
 | --- | --- | --- |
 | [`crates/gdview`](crates/gdview) | Read-only project introspection. No engine, no writes. | nothing |
 | [`crates/gdproject`](crates/gdproject) | A project bound to its engine: config, probe, process supervision, harness protocol, every engine-backed operation. | gdview |
-| [`crates/gdkit`](crates/gdkit) | The CLI. Args, rendering, exit codes. No logic. | both |
+| [`gdkit`](src) (repo root) | The CLI. Args, rendering, exit codes. No logic. | both |
 
 The intended command surface is described in [docs/AGENT_USE.md](docs/AGENT_USE.md): `check` (static then engine, `--slice`, `--script`, `--baseline`), `api`,
 `refs`, `settings`, `resource`, `scene-tree`, `autoloads`, `net`, `import`,
@@ -33,11 +33,12 @@ The intended command surface is described in [docs/AGENT_USE.md](docs/AGENT_USE.
 Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the rules each crate
 enforces, the call flow for every command, the harness protocol, and the test
 matrix. Each module's doc comment lists its acceptance tests by name under
-`crates/*/tests/`. Implemented module gates have completed tests; this does not
+`crates/*/tests/` and `tests/`. Implemented module gates have completed tests; this does not
 mean every workspace scaffold is done. Real-engine tests remain opt-in, and
 explicitly deferred tests are distinct from completed gates.
 
 ```sh
+cargo install --path .                                 # installs the gdkit binary
 cargo check --workspace --all-targets --all-features
 cargo test  --workspace --all-features                 # implemented offline tests; scaffolds ignored
 # With GDKIT_TEST_GODOT set to a real engine executable:
