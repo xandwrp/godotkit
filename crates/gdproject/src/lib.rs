@@ -7,6 +7,8 @@
 //!   `run` returns, so there is no pid bookkeeping across calls.
 //! - Never mutates a file the user authored. Writes go to `.godot/gdkit/**`,
 //!   to scratch copies, or to brand-new files published with create-new semantics.
+//!   The one exception is the user's global config, which [`global`] edits in
+//!   place only when asked to (`gdkit config set`/`unset`).
 //! - Operations return `Ok(report)` when the *tool* worked, even if the *project*
 //!   failed the check. `Err` means gdkit itself could not do its job.
 //!   The CLI maps that to exit 2; report verdicts map to 0/1.
@@ -15,7 +17,7 @@
 //!
 //! Layering:
 //! ```text
-//! config, process, protocol, diagnostics             (no engine)
+//! config, global, process, protocol, diagnostics     (no engine)
 //!   └─ workspace, engine                             (filesystem state, probe)
 //!        └─ runner                                   (one engine invocation)
 //!             └─ check, api, resource, cache, run    (operations; probe serves run)
@@ -28,6 +30,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod engine;
 pub mod error;
+pub mod global;
 pub mod probe;
 pub mod process;
 pub mod protocol;

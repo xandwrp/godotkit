@@ -186,36 +186,37 @@ fn select_engine_precedence_is_flag_then_env_then_config() {
         (None, Some(&env), &env_path, SelectionSource::Environment),
         (None, None, &configured, SelectionSource::ProjectConfig),
     ] {
-        let selected = select_engine(dir.path(), explicit, environment, Some(&config)).unwrap();
+        let selected =
+            select_engine(dir.path(), explicit, environment, Some(&config), None).unwrap();
         assert_eq!(&selected.executable, expected);
         assert_eq!(selected.source, source);
     }
     assert!(matches!(
-        select_engine(dir.path(), None, None, None),
+        select_engine(dir.path(), None, None, None, None),
         Err(Error::NoEngine)
     ));
     assert!(matches!(
-        select_engine(dir.path(), None, None, Some(&Config::default())),
+        select_engine(dir.path(), None, None, Some(&Config::default()), None),
         Err(Error::NoEngine)
     ));
     let missing = dir.path().join("missing");
     assert!(
-        matches!(select_engine(dir.path(), Some(&missing), Some(&env), Some(&config)), Err(Error::EngineNotFound(path)) if path == missing)
+        matches!(select_engine(dir.path(), Some(&missing), Some(&env), Some(&config), None), Err(Error::EngineNotFound(path)) if path == missing)
     );
     for invalid in [missing.into_os_string(), dir.path().as_os_str().to_owned()] {
         assert!(matches!(
-            select_engine(dir.path(), None, Some(&invalid), Some(&config)),
+            select_engine(dir.path(), None, Some(&invalid), Some(&config), None),
             Err(Error::EngineNotFound(_))
         ));
     }
     // An empty or whitespace-only GDKIT_GODOT is unset: it falls back to gdkit.toml.
     for blank in ["", " ", "\t\n"] {
         let blank = OsString::from(blank);
-        let selected = select_engine(dir.path(), None, Some(&blank), Some(&config)).unwrap();
+        let selected = select_engine(dir.path(), None, Some(&blank), Some(&config), None).unwrap();
         assert_eq!(selected.executable, configured);
         assert_eq!(selected.source, SelectionSource::ProjectConfig);
         assert!(matches!(
-            select_engine(dir.path(), None, Some(&blank), None),
+            select_engine(dir.path(), None, Some(&blank), None, None),
             Err(Error::NoEngine)
         ));
     }
@@ -224,7 +225,8 @@ fn select_engine_precedence_is_flag_then_env_then_config() {
             dir.path(),
             Some(&flag),
             Some(&OsString::new()),
-            Some(&engine_config("missing"))
+            Some(&engine_config("missing")),
+            None,
         )
         .is_ok()
     );
@@ -244,7 +246,7 @@ fn relative_engine_paths_resolve_against_the_config_file() {
         Path::new("../godot")
     );
     assert_eq!(
-        select_engine(&root, None, None, Some(&config))
+        select_engine(&root, None, None, Some(&config), None)
             .unwrap()
             .executable,
         engine
@@ -257,7 +259,7 @@ fn relative_engine_paths_resolve_against_the_config_file() {
     let env = relative.as_os_str().to_owned();
     for (explicit, environment) in [(Some(relative.as_path()), None), (None, Some(&env))] {
         assert_eq!(
-            select_engine(&root, explicit, environment, None)
+            select_engine(&root, explicit, environment, None, None)
                 .unwrap()
                 .executable,
             engine
@@ -324,7 +326,7 @@ fn bare_names_are_looked_up_on_path_and_paths_with_separators_are_not() {
         (None, None, Some(&config), SelectionSource::ProjectConfig),
     ] {
         let selected =
-            select_engine_with_search_path(&root, explicit, environment, config, Some(&path))
+            select_engine_with_search_path(&root, explicit, environment, config, None, Some(&path))
                 .unwrap();
         assert_eq!(selected.executable, shadowed);
         assert_eq!(selected.source, source);
@@ -333,7 +335,7 @@ fn bare_names_are_looked_up_on_path_and_paths_with_separators_are_not() {
     let preferred = executable(&first.join(&name));
     let both = search_path(&[&first, &second]);
     assert_eq!(
-        select_engine_with_search_path(&root, Some(&flag), None, None, Some(&both))
+        select_engine_with_search_path(&root, Some(&flag), None, None, None, Some(&both))
             .unwrap()
             .executable,
         preferred
@@ -342,11 +344,18 @@ fn bare_names_are_looked_up_on_path_and_paths_with_separators_are_not() {
     executable(&root.join(&name));
     for search in [None, Some(search_path(&[&empty]))] {
         assert!(matches!(
-            select_engine_with_search_path(&root, Some(&flag), None, None, search.as_deref()),
+            select_engine_with_search_path(&root, Some(&flag), None, None, None, search.as_deref()),
             Err(Error::EngineNotOnPath(missing)) if missing == flag
         ));
         assert!(matches!(
-            select_engine_with_search_path(&root, None, None, Some(&config), search.as_deref()),
+            select_engine_with_search_path(
+                &root,
+                None,
+                None,
+                Some(&config),
+                None,
+                search.as_deref()
+            ),
             Err(Error::EngineNotOnPath(_))
         ));
     }
@@ -358,20 +367,21 @@ fn bare_names_are_looked_up_on_path_and_paths_with_separators_are_not() {
             None,
             None,
             Some(&engine_config(&dotted)),
-            Some(&both)
+            None,
+            Some(&both),
         )
         .unwrap()
         .executable,
         fs::canonicalize(root.join(&name)).unwrap()
     );
     assert!(matches!(
-        select_engine_with_search_path(&root, Some(&dotted), None, None, Some(&both)),
+        select_engine_with_search_path(&root, Some(&dotted), None, None, None, Some(&both)),
         Err(Error::EngineNotFound(_))
     ));
     // Directories named like the engine are skipped.
     fs::create_dir(empty.join(&name)).unwrap();
     assert_eq!(
-        select_engine_with_search_path(&root, Some(&flag), None, None, Some(&path))
+        select_engine_with_search_path(&root, Some(&flag), None, None, None, Some(&path))
             .unwrap()
             .executable,
         shadowed
@@ -393,7 +403,8 @@ fn path_lookup_skips_files_that_are_not_executable() {
             Some(Path::new("godot")),
             None,
             None,
-            Some(&search_path(&[&first, &second]))
+            None,
+            Some(&search_path(&[&first, &second])),
         )
         .unwrap()
         .executable,
@@ -419,11 +430,17 @@ fn write_initial_refuses_to_overwrite_and_stores_the_path_as_given() {
     let path = Config::write_initial(&root, &engine).unwrap();
     assert_eq!(path, root.join(CONFIG_FILE_NAME));
     let original = fs::read(&path).unwrap();
+    // Only the pin, so a hand edit starts from a short file.
+    let text = String::from_utf8(original.clone()).unwrap();
+    assert!(
+        text.contains("[engine]") && !text.contains("[check]") && !text.contains("[run]"),
+        "{text}"
+    );
     let config = Config::load(&root).unwrap().unwrap();
     // Outside the project: absolute, never `../`-relative to the project depth.
     assert_eq!(config.engine.as_ref().unwrap().executable, engine);
     assert_eq!(
-        select_engine(&root, None, None, Some(&config))
+        select_engine(&root, None, None, Some(&config), None)
             .unwrap()
             .executable,
         engine
@@ -454,7 +471,8 @@ fn write_initial_refuses_to_overwrite_and_stores_the_path_as_given() {
             None,
             None,
             Config::load(&root).unwrap().as_ref(),
-            None
+            None,
+            None,
         )
         .unwrap()
         .executable,
@@ -470,9 +488,15 @@ fn write_initial_refuses_to_overwrite_and_stores_the_path_as_given() {
             .contains("executable = \"tools/bin/godot\"")
     );
     assert_eq!(
-        select_engine(&root, None, None, Config::load(&root).unwrap().as_ref())
-            .unwrap()
-            .executable,
+        select_engine(
+            &root,
+            None,
+            None,
+            Config::load(&root).unwrap().as_ref(),
+            None
+        )
+        .unwrap()
+        .executable,
         deep
     );
 }
@@ -500,7 +524,8 @@ fn write_initial_stores_bare_names_bare_for_path_lookup() {
             None,
             None,
             Config::load(&root).unwrap().as_ref(),
-            Some(&path)
+            None,
+            Some(&path),
         )
         .unwrap()
         .executable,
@@ -527,9 +552,15 @@ fn write_initial_keeps_symlinks_and_the_absolute_path_as_given() {
     fs::remove_file(&shim).unwrap();
     symlink(&new, &shim).unwrap();
     assert_eq!(
-        select_engine(&root, None, None, Config::load(&root).unwrap().as_ref())
-            .unwrap()
-            .executable,
+        select_engine(
+            &root,
+            None,
+            None,
+            Config::load(&root).unwrap().as_ref(),
+            None
+        )
+        .unwrap()
+        .executable,
         new
     );
     // A project reached through a symlink still stores project-internal engines relatively.
@@ -550,7 +581,7 @@ fn symlinks_are_canonicalized_for_selection_but_never_overwritten() {
     let alias = dir.path().join("alias");
     symlink(&engine, &alias).unwrap();
     assert_eq!(
-        select_engine(dir.path(), Some(&alias), None, None)
+        select_engine(dir.path(), Some(&alias), None, None, None)
             .unwrap()
             .executable,
         engine
@@ -602,10 +633,36 @@ fn concurrent_initialization_has_exactly_one_winner() {
             dir.path(),
             None,
             None,
-            Config::load(dir.path()).unwrap().as_ref()
+            Config::load(dir.path()).unwrap().as_ref(),
+            None,
         )
         .unwrap()
         .executable,
         engine
     );
+}
+
+#[test]
+fn write_initial_unpinned_leaves_the_engine_to_the_global_default() {
+    let dir = tempdir().unwrap();
+    let path = Config::write_initial_unpinned(dir.path()).unwrap();
+    assert_eq!(path, dir.path().join(CONFIG_FILE_NAME));
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("gdkit config set godot"), "{text}");
+    let config = Config::load(dir.path()).unwrap().unwrap();
+    assert!(config.engine.is_none());
+    assert!(matches!(
+        Config::write_initial_unpinned(dir.path()),
+        Err(Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::AlreadyExists
+    ));
+    assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    // Uncommenting the example pins the project.
+    let engine = file(&dir.path().join("godot"));
+    let pinned = text.replace("# [engine]", "[engine]").replace(
+        "# executable = \"/path/to/godot\"",
+        "executable = './godot'",
+    );
+    fs::write(&path, pinned).unwrap();
+    assert_eq!(stored(dir.path()), Path::new("./godot"));
+    assert!(Config::write_initial_unpinned(&dir.path().join("missing")).is_err());
 }

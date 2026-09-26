@@ -19,8 +19,8 @@ in the same change that implements the command.
 
 The command surface is exactly what [AGENT_USE.md](AGENT_USE.md) lists. Anything
 not on that page is not stubbed, on purpose. These flows describe the intended
-architecture: `check` is implemented end to end, but other command scaffolds
-remain. Check's API-cache diagnostic enrichment is explicitly deferred.
+architecture: `check`, `init`, and `config` are implemented end to end, but other
+command scaffolds remain. Check's API-cache diagnostic enrichment is explicitly deferred.
 
 ## Rules that are enforced by structure, not discipline
 
@@ -33,7 +33,7 @@ remain. Check's API-cache diagnostic enrichment is explicitly deferred.
 | One Variant JSON grammar | `gdview::variant::VariantJson` in Rust, `harness/protocol.gd` in GDScript, golden-fixture tested against each other |
 | One result envelope, version-checked | `protocol::Envelope`; `parse_envelope` rejects a version mismatch before decoding the payload |
 | Tool failure vs project failure | Startup/probe/configuration errors are `Err` (exit 2). Failed or incomplete check reports, including phase timeouts, exit 1 |
-| Never mutate an authored file | `workspace::publish_new_file` is create-new only; `IsolatedCopy` and `ArtifactDir` are the only other write paths; probe metadata and artifacts use `.godot/gdkit`; check never seeds or updates the source import cache |
+| Never mutate an authored file | `workspace::publish_new_file` is create-new only; `IsolatedCopy` and `ArtifactDir` are the only other write paths; probe metadata and artifacts use `.godot/gdkit`; check never seeds or updates the source import cache. The one in-place edit is the user's global config, by `global::GlobalConfig::{set_engine, unset_engine}` only (`gdkit config set`/`unset`), atomically and keeping comments |
 | Static before dynamic | `check` runs `gdview::xref` before any engine phase; `--static-only` needs no engine at all |
 | Diagnostics have a stable identity | `Diagnostic.identity` excludes line (including lines embedded in resource parse messages) and occurrence count, and scratch-copy paths are rewritten to `res://`, so `--baseline` survives edits and runs |
 | Platform scope is explicit | Runtime verified on Linux; macOS shares POSIX code but is not runtime-verified here. Windows Job objects are out of scope; no Windows process-tree cleanup guarantee |
@@ -90,6 +90,20 @@ or replace a required completion payload.
   4. emit; a miss is Exit::Failed with suggestions
 --dump: load_native (or load_native_standalone with an empty IsolatedCopy) → print ApiIndex JSON
 ```
+
+### `gdkit init` and `gdkit config …`
+
+```
+init:   ctx.workspace → refuse an existing gdkit.toml → ctx.engine (flag > env > global; probe, cache)
+        → Config::write_initial (--godot pins it) | Config::write_initial_unpinned (follows the default)
+config: GlobalConfig::locate (GDKIT_CONFIG_DIR > XDG_CONFIG_HOME/HOME > APPDATA)
+        get/list: GlobalConfig::load → emit              (get exits 1 when unset)
+        set:      ctx.standalone_engine(value) (probe) → GlobalConfig::set_engine → emit
+        unset:    GlobalConfig::unset_engine → emit
+```
+
+`ctx.engine` and `ctx.standalone_engine` load the global config for every
+engine-backed command; it is the last source `config::select_engine` consults.
 
 ### `gdkit refs res://x` and `gdkit settings …` (offline)
 
@@ -170,7 +184,7 @@ or Windows process-lifecycle guarantees.
 | gdview (all modules) | fixtures + strings; every test | syntax corpus (`GODOT_SOURCE`); `extension_api.json` fixture refresh |
 | gdproject::process | `sleep`/`sh`/`cmd` subjects: deadline, tree kill, log streaming, guard drop | none |
 | gdproject::engine, runner, api, check, run | `fake-godot` with per-executable scenario/log sidecars; asserts exact argv, envelopes, timeouts, artifacts | `real_engine_*`: harness correctness, golden fixtures, the GDExtension-in-dump question |
-| gdproject::protocol, diagnostics, workspace, config | pure | `protocol_gd` golden refresh |
+| gdproject::protocol, diagnostics, workspace, config, global | pure | `protocol_gd` golden refresh |
 | gdproject::resource, probe, cache | validation, echo mismatch, staging cleanup, fake TCP responder, lock | round-trip every Variant type; probe under script error |
 | gdkit | drives the binary; JSON purity, exit codes; engine tests build the fake helper once per run via offline Cargo into `target/tmp` (reused across runs; three-minute deadline) | none |
 

@@ -8,7 +8,7 @@ pub enum Error {
     #[error("{path}: {message}")]
     Config { path: PathBuf, message: String },
     #[error(
-        "no engine configured; pass --godot <path>, set GDKIT_GODOT, or add `[engine]` with `executable = \"<path>\"` to gdkit.toml"
+        "no engine configured; run `gdkit config set godot <path>` for a default, or pass --godot <path>, set GDKIT_GODOT, or add `[engine]` with `executable = \"<path>\"` to gdkit.toml"
     )]
     NoEngine,
     #[error("Godot executable not found: {0}")]

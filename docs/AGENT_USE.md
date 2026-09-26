@@ -3,9 +3,9 @@
 What an agent working in a Godot project with no editor open actually reaches
 for, in the order it reaches for it, and what it does with the answer. This is
 the priority list for implementation: if a command is not on this page, it can
-wait. `check` (including engine phases, slices, baselines, and project scripts)
-is implemented; the other workflows below describe the intended surface, not a
-claim that all command scaffolds are complete. API-cache diagnostic enrichment
+wait. `check` (including engine phases, slices, baselines, and project scripts),
+`init`, and `config` are implemented; the other workflows below describe the
+intended surface, not a claim that all command scaffolds are complete. API-cache diagnostic enrichment
 for `check` remains deferred.
 
 The shape every command on this page shares:
@@ -227,15 +227,33 @@ points at a file, so a move or rename is done with the full list in hand rather
 than discovered by the next `check`. `settings input` is the answer to `"jump"`
 vs `"ui_accept"`; `settings layers` makes collision masks readable.
 
+## Engine setup: `config` once per machine, `init` once per project
+
+```sh
+gdkit config set godot /usr/bin/godot     # machine-wide default; probed before it is saved
+gdkit init                                # gdkit.toml that follows the default
+gdkit init --godot ~/godot/4.4/godot      # gdkit.toml that pins this project's engine
+gdkit config get godot                    # `list` shows the file path too
+```
+
+Engine selection, for every command: `--godot`, then `GDKIT_GODOT`, then
+`[engine] executable` in the project's `gdkit.toml`, then the global default.
+The global config is `$GDKIT_CONFIG_DIR/config.toml` when that is set, else
+`$XDG_CONFIG_HOME/gdkit/config.toml` or `~/.config/gdkit/config.toml`
+(`%APPDATA%\gdkit\config.toml` on Windows). It takes the same `[engine]
+executable` table as `gdkit.toml`, and `config set`/`unset` keep hand-written
+comments. `init` probes the engine before writing, and refuses to replace an
+existing `gdkit.toml`: edit the file instead.
+
 ## 0. `doctor`: run this first in an unfamiliar repo
 
 ```sh
 gdkit doctor
 ```
 
-Which engine will be used and why (`--godot`, `GDKIT_GODOT`, or `gdkit.toml`, in
-that order; a bare name such as `godot` is looked up on `PATH`, and an empty
-`GDKIT_GODOT` counts as unset),
+Which engine will be used and why (`--godot`, `GDKIT_GODOT`, `gdkit.toml`, or
+the global default, in that order; a bare name such as `godot` is looked up on
+`PATH`, and an empty `GDKIT_GODOT` counts as unset),
 its version, whether the probe cache is warm, the project's warning policy,
 which sessions are recorded and whether any record is corrupt. Thirty seconds
 here saves the twenty minutes an agent otherwise spends debugging a wrong

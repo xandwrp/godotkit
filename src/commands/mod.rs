@@ -7,6 +7,7 @@ use crate::render::Exit;
 pub mod api;
 pub mod autoloads;
 pub mod check;
+pub mod config;
 pub mod doctor;
 pub mod import;
 pub mod init;
@@ -20,6 +21,7 @@ pub mod settings;
 pub fn dispatch(ctx: &Context, command: Command) -> gdproject::Result<Exit> {
     match command {
         Command::Init { project } => init::run(ctx, project),
+        Command::Config { command } => config::run(ctx, command),
         Command::Doctor { project } => doctor::run(ctx, project),
         Command::Check(args) => check::run(ctx, args),
         Command::Api(args) => api::run(ctx, args),
