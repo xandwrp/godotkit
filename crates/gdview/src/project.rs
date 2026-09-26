@@ -80,7 +80,12 @@ impl Project {
 
     /// Parses `project.godot` now.
     pub fn settings(&self) -> crate::Result<Settings> {
-        todo!()
+        let path = self.config_path();
+        let source = std::fs::read_to_string(&path).map_err(|source| crate::Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        Settings::parse(&source).map_err(|error| error.with_path(path))
     }
 
     /// Enumerates project files. See [`FileQuery`] for ignore semantics.

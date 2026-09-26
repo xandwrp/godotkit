@@ -3,9 +3,9 @@
 What an agent working in a Godot project with no editor open actually reaches
 for, in the order it reaches for it, and what it does with the answer. This is
 the priority list for implementation: if a command is not on this page, it can
-wait. `check` (including engine phases, slices, baselines, and project scripts)
-is implemented; the other workflows below describe the intended surface, not a
-claim that all command scaffolds are complete. API-cache diagnostic enrichment
+wait. `check` (including engine phases, slices, baselines, and project scripts),
+`api`, `init`, and `config` are implemented; the other workflows below describe the
+intended surface, not a claim that all command scaffolds are complete. API-cache diagnostic enrichment
 for `check` remains deferred.
 
 The shape every command on this page shares:
@@ -95,30 +95,54 @@ gdkit api CharacterBody3D move_and_slide
 gdkit api CharacterBody3D
 gdkit api String split                # builtin Variant classes
 gdkit api lerp                        # utility functions
-gdkit api search multiplayer
+gdkit api range                       # GDScript's own functions and @annotations
+gdkit api search multiplayer --limit 40
 gdkit api WeaponDefinition            # project class_name scripts are included
+gdkit api BoxManager                  # so are autoloads, by autoload name
 gdkit api --dump --output json > .godot/gdkit/api.json
 ```
 
 Agents hallucinate Godot method names, argument orders, and which class a
-method is declared on. `api` is backed by the engine's own
-`--dump-extension-api-with-docs`, so it covers what ClassDB reflection never
-could: builtin Variant methods (`String.split`, `Array.filter`), utility
-functions (`lerp`, `clamp`, `randf_range`), global enums, singletons, and a
-one-line description for each. The project's `class_name` scripts are merged
-in from source.
+method is declared on. `api` asks the configured editor itself, so answers
+match that exact engine build:
+
+- `--dump-extension-api-with-docs`: classes, builtin Variant types
+  (`String.split`, `Vector3(x, y, z)`, `Vector3.ZERO`), utility functions,
+  global enums and constants, singletons, and descriptions.
+- `--doctool`: `@GDScript` (`range`, `preload`, `@export_range`) and property
+  defaults. The engine ships no descriptions for `@GDScript`, so those entries
+  have signatures only.
+- `--doctool --gdscript-docs`: the project's scripts, with their `##` doc
+  comments and the engine's inferred types (`speed := 2.0` is a `float`).
 
 The answers that matter:
 
 - A signature with the declaring class, so `move_and_slide` is known to come
-  from `CharacterBody3D`, not `PhysicsBody3D`.
+  from `CharacterBody3D`, not `PhysicsBody3D`, and `take_damage` from
+  `res://player.gd:42`.
 - Argument names, types, and defaults, so a call site can be written once.
-- On a miss, exit `1` with `suggestions[]`. "Did you mean `set_deferred`" is the
-  correction the agent needs, and it needs it to be machine-readable.
+  Enum defaults are named (`Node.INTERNAL_MODE_DISABLED`, not `0`).
+- Descriptions as plain text: code in backticks, GDScript examples fenced,
+  C# dropped, references collected into `see_also`.
+- On a miss, exit `1` with `suggestions[]`. "Did you mean `move_and_slide`" is
+  the correction the agent needs, and it needs it to be machine-readable.
 
-`--dump` once per engine+project and grep the file locally is the cheap mode.
-The cache is keyed on the engine binary and the project's GDExtension
-libraries, so a rebuilt extension is picked up without the agent knowing.
+JSON answers have `kind`: `class`, `member` (with `member_kind`: `method`,
+`property`, `signal`, `constant`, `enum`, `enum_value`, `utility_function`,
+`gdscript_function`, `annotation`, `global_enum`, `global_enum_value`,
+`global_constant`, `gdscript_constant`), `search`, or `miss`. A class lists the
+members it declares; ask for a member to reach inherited ones.
+
+The engine index is cached per engine in `.godot/gdkit/api-index.json` (about
+3s to build, then instant). Project script docs are cached against the script
+contents in `.godot/gdkit/api-scripts.json` and are only built when an answer
+needs them. Answers that needed them carry `project_scripts`: `source` is
+`project` when the engine read the imported project in place, and
+`script_copy` when it could not (not imported yet, or another gdkit held the
+lock), in which case scripts that depend on other classes or preloaded assets
+may not resolve. A script the engine could not document is still answered from
+its source (`from_engine: false`, no descriptions), and `fallbacks` says why.
+Open the project in the editor once (or run an import) for complete answers.
 
 ## 3. `resource schema` + `resource create`: `.tres` as a form
 
@@ -227,15 +251,33 @@ points at a file, so a move or rename is done with the full list in hand rather
 than discovered by the next `check`. `settings input` is the answer to `"jump"`
 vs `"ui_accept"`; `settings layers` makes collision masks readable.
 
+## Engine setup: `config` once per machine, `init` once per project
+
+```sh
+gdkit config set godot /usr/bin/godot     # machine-wide default; probed before it is saved
+gdkit init                                # gdkit.toml that follows the default
+gdkit init --godot ~/godot/4.4/godot      # gdkit.toml that pins this project's engine
+gdkit config get godot                    # `list` shows the file path too
+```
+
+Engine selection, for every command: `--godot`, then `GDKIT_GODOT`, then
+`[engine] executable` in the project's `gdkit.toml`, then the global default.
+The global config is `$GDKIT_CONFIG_DIR/config.toml` when that is set, else
+`$XDG_CONFIG_HOME/gdkit/config.toml` or `~/.config/gdkit/config.toml`
+(`%APPDATA%\gdkit\config.toml` on Windows). It takes the same `[engine]
+executable` table as `gdkit.toml`, and `config set`/`unset` keep hand-written
+comments. `init` probes the engine before writing, and refuses to replace an
+existing `gdkit.toml`: edit the file instead.
+
 ## 0. `doctor`: run this first in an unfamiliar repo
 
 ```sh
 gdkit doctor
 ```
 
-Which engine will be used and why (`--godot`, `GDKIT_GODOT`, or `gdkit.toml`, in
-that order; a bare name such as `godot` is looked up on `PATH`, and an empty
-`GDKIT_GODOT` counts as unset),
+Which engine will be used and why (`--godot`, `GDKIT_GODOT`, `gdkit.toml`, or
+the global default, in that order; a bare name such as `godot` is looked up on
+`PATH`, and an empty `GDKIT_GODOT` counts as unset),
 its version, whether the probe cache is warm, the project's warning policy,
 which sessions are recorded and whether any record is corrupt. Thirty seconds
 here saves the twenty minutes an agent otherwise spends debugging a wrong

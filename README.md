@@ -10,6 +10,13 @@ a full-file inventory using the union of editor and runtime loader registries.
 Source assets are copied; the source `.godot` cache is not seeded into the copy.
 API-cache diagnostic enrichment remains deferred.
 
+Also landed: `config` keeps machine-wide defaults (`gdkit config set godot <path>`),
+and `init` writes a `gdkit.toml` that follows that default or, with `--godot`,
+pins the project's own engine. `api` answers class, member, global, and search
+queries from the configured editor's own API dump, class reference, and
+`--gdscript-docs` output for the project's scripts, cached per engine and script
+content; project GDExtension classes are not covered yet.
+
 Exit codes: `0` passed, `1` failed or incomplete (including check-phase timeouts),
 `2` tool/startup, engine-probe, or configuration errors. A baseline permits engine
 validation of carried static findings but does not erase their failed verdict;
@@ -24,20 +31,21 @@ Job objects are out of scope, and Windows process-tree cleanup is not guaranteed
 | --- | --- | --- |
 | [`crates/gdview`](crates/gdview) | Read-only project introspection. No engine, no writes. | nothing |
 | [`crates/gdproject`](crates/gdproject) | A project bound to its engine: config, probe, process supervision, harness protocol, every engine-backed operation. | gdview |
-| [`crates/gdkit`](crates/gdkit) | The CLI. Args, rendering, exit codes. No logic. | both |
+| [`gdkit`](src) (repo root) | The CLI. Args, rendering, exit codes. No logic. | both |
 
 The intended command surface is described in [docs/AGENT_USE.md](docs/AGENT_USE.md): `check` (static then engine, `--slice`, `--script`, `--baseline`), `api`,
 `refs`, `settings`, `resource`, `scene-tree`, `autoloads`, `net`, `import`,
-`run`, `init`, `doctor`. Nothing else is stubbed, on purpose.
+`run`, `init`, `config`, `doctor`. Nothing else is stubbed, on purpose.
 
 Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the rules each crate
 enforces, the call flow for every command, the harness protocol, and the test
 matrix. Each module's doc comment lists its acceptance tests by name under
-`crates/*/tests/`. Implemented module gates have completed tests; this does not
+`crates/*/tests/` and `tests/`. Implemented module gates have completed tests; this does not
 mean every workspace scaffold is done. Real-engine tests remain opt-in, and
 explicitly deferred tests are distinct from completed gates.
 
 ```sh
+cargo install --path .                                 # installs the gdkit binary
 cargo check --workspace --all-targets --all-features
 cargo test  --workspace --all-features                 # implemented offline tests; scaffolds ignored
 # With GDKIT_TEST_GODOT set to a real engine executable:

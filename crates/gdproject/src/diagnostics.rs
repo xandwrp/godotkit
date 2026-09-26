@@ -147,18 +147,9 @@ pub fn suggest(diagnostics: &mut [Diagnostic], api: Option<&gdview::api::ApiInde
                 next = class.parent.as_deref();
             }
         }
-        let query = name.to_lowercase();
-        let threshold = (query.chars().count() / 3).clamp(1, 3);
-        let mut ranked: Vec<_> = candidates
-            .into_iter()
-            .filter(|candidate| *candidate != name)
-            .map(|candidate| (edit_distance(&query, &candidate.to_lowercase()), candidate))
-            .filter(|(distance, _)| *distance <= threshold)
-            .collect();
-        ranked.sort_unstable();
-        for (_, candidate) in ranked.into_iter().take(5) {
-            if !diagnostic.suggestions.iter().any(|s| s == candidate) {
-                diagnostic.suggestions.push(candidate.to_owned());
+        for candidate in gdview::similar::similar(name, candidates, 5) {
+            if !diagnostic.suggestions.contains(&candidate) {
+                diagnostic.suggestions.push(candidate);
             }
         }
         // Node paths require a scene tree, which an engine API index does not contain.
@@ -172,23 +163,6 @@ fn quoted_after<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
         return None;
     }
     rest[1..].split_once(quote).map(|(value, _)| value)
-}
-
-fn edit_distance(left: &str, right: &str) -> usize {
-    let right: Vec<_> = right.chars().collect();
-    let mut row: Vec<_> = (0..=right.len()).collect();
-    for (i, a) in left.chars().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
-        for (j, b) in right.iter().enumerate() {
-            let previous = row[j + 1];
-            row[j + 1] = (previous + 1)
-                .min(row[j] + 1)
-                .min(diagonal + usize::from(a != *b));
-            diagonal = previous;
-        }
-    }
-    row[right.len()]
 }
 
 /// Parses every header line and its frames. Duplicates collapse into `occurrences`.

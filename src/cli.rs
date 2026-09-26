@@ -33,17 +33,22 @@ pub struct ProjectArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Godot editor executable (overrides GDKIT_GODOT and gdkit.toml)"
+        help = "Godot editor executable (overrides GDKIT_GODOT, gdkit.toml, and `gdkit config`)"
     )]
     pub godot: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Associate the project with an engine (writes gdkit.toml).
+    /// Create gdkit.toml. With --godot, pin that engine; otherwise follow the global default.
     Init {
         #[command(flatten)]
         project: ProjectArgs,
+    },
+    /// Machine-wide defaults, such as the Godot editor every project uses unless it pins one.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
     /// Explain the resolved engine, config, caches, and warning policy.
     Doctor {
@@ -135,6 +140,8 @@ pub struct ApiArgs {
     pub member: Option<String>,
     #[arg(long, conflicts_with_all = ["query", "member"], help = "Write the full native index as JSON")]
     pub dump: bool,
+    #[arg(long, default_value_t = 20, help = "Most results for `search`")]
+    pub limit: usize,
 }
 
 #[derive(Debug, Subcommand)]
@@ -149,6 +156,28 @@ pub enum SettingsCommand {
     MainScene,
     /// Raw value of one key: `gdkit settings get application config/name`.
     Get { section: String, key: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Print one value; exits 1 when it is not set.
+    Get { key: ConfigKey },
+    /// Set a value. `godot` is probed first, so only a working Godot 4 editor is saved.
+    Set {
+        key: ConfigKey,
+        #[arg(help = "A path, or a bare name such as `godot` to look up on PATH when used")]
+        value: PathBuf,
+    },
+    /// Remove a value.
+    Unset { key: ConfigKey },
+    /// Print the config file's path and every value.
+    List,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ConfigKey {
+    /// Default Godot editor executable (`[engine] executable` in the file).
+    Godot,
 }
 
 #[derive(Debug, Subcommand)]

@@ -18,23 +18,80 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::autoload::Autoloads;
+use crate::autoload::{AutoloadTarget, Autoloads};
 use crate::respath::ResPath;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Settings {
-    /// `section -> key -> raw value text`. The root section is `""`.
-    pub sections: BTreeMap<String, BTreeMap<String, String>>,
+    /// `section -> [(key, raw value text)]` in file order. The root section is `""`.
+    pub sections: BTreeMap<String, Vec<(String, String)>>,
 }
 
 impl Settings {
+    /// Godot's `ConfigFile` text: `[section]` headers, `key=value` lines whose
+    /// value may span lines while a bracket or string is open, and `;`/`#`
+    /// comment lines. Values are kept as written (trimmed).
     pub fn parse(source: &str) -> crate::Result<Self> {
-        todo!()
+        let mut settings = Settings::default();
+        let mut section = String::new();
+        let mut lines = source.lines().enumerate();
+        while let Some((index, line)) = lines.next() {
+            let number = index + 1;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some(header) = trimmed.strip_prefix('[') {
+                let name = header
+                    .strip_suffix(']')
+                    .ok_or_else(|| parse_error(number, "unterminated section header"))?;
+                section = name.trim().to_owned();
+                settings.sections.entry(section.clone()).or_default();
+                continue;
+            }
+            let Some((key, value)) = trimmed.split_once('=') else {
+                return Err(parse_error(
+                    number,
+                    format!("expected `key=value`, found `{trimmed}`"),
+                ));
+            };
+            let key = key.trim();
+            if key.is_empty() {
+                return Err(parse_error(number, "empty key"));
+            }
+            let mut value = value.to_owned();
+            let mut scan = ValueScan::default();
+            scan.feed(&value);
+            while scan.open() {
+                let Some((_, next)) = lines.next() else {
+                    return Err(parse_error(
+                        number,
+                        format!("value of `{key}` is never closed"),
+                    ));
+                };
+                value.push('\n');
+                value.push_str(next);
+                scan.feed("\n");
+                scan.feed(next);
+            }
+            settings
+                .sections
+                .entry(section.clone())
+                .or_default()
+                .push((key.to_owned(), value.trim().to_owned()));
+        }
+        Ok(settings)
     }
 
     /// Raw value text for `section/key`, e.g. `("debug", "gdscript/warnings/enable")`.
+    /// A key repeated in its section answers with its last value, as Godot reads it.
     pub fn get(&self, section: &str, key: &str) -> Option<&str> {
-        todo!()
+        self.sections
+            .get(section)?
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
     }
 
     pub fn config_version(&self) -> Option<u32> {
@@ -46,8 +103,35 @@ impl Settings {
         todo!()
     }
 
+    /// `[autoload]` in declaration order. `*` marks a global singleton; targets
+    /// are `res://` paths or `uid://`s (see [`crate::autoload::Autoload::path`]).
     pub fn autoloads(&self) -> crate::Result<Autoloads> {
-        todo!()
+        let entries = self
+            .sections
+            .get("autoload")
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut autoloads = Vec::with_capacity(entries.len());
+        for (name, value) in entries {
+            let text = unquote(value).ok_or_else(|| {
+                crate::Error::InvalidResPath(format!("autoload {name} = {value}"))
+            })?;
+            let (singleton, target) = match text.strip_prefix('*') {
+                Some(target) => (true, target),
+                None => (false, text.as_str()),
+            };
+            let target = if target.starts_with("uid://") {
+                AutoloadTarget::Uid(crate::respath::Uid(target.to_owned()))
+            } else {
+                AutoloadTarget::Path(ResPath::parse(target)?)
+            };
+            autoloads.push(crate::autoload::Autoload {
+                name: name.clone(),
+                target,
+                singleton,
+            });
+        }
+        Ok(Autoloads(autoloads))
     }
 
     /// The GDScript warning policy as the engine will apply it.
@@ -145,4 +229,62 @@ pub struct WindowSettings {
     pub stretch_mode: String,
     pub stretch_aspect: String,
     pub resizable: bool,
+}
+
+fn parse_error(line: usize, message: impl Into<String>) -> crate::Error {
+    crate::Error::Parse {
+        path: None,
+        line,
+        message: message.into(),
+    }
+}
+
+/// A quoted string value's contents, with `\"` and `\\` unescaped.
+fn unquote(value: &str) -> Option<String> {
+    let inner = value.strip_prefix('"')?.strip_suffix('"')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            out.push(chars.next()?);
+        } else {
+            out.push(ch);
+        }
+    }
+    Some(out)
+}
+
+/// Tracks whether a value is still open: an unclosed string, or unbalanced
+/// `(`, `[`, `{` outside strings.
+#[derive(Default)]
+struct ValueScan {
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+}
+
+impl ValueScan {
+    fn feed(&mut self, text: &str) {
+        for ch in text.chars() {
+            if self.in_string {
+                match (self.escaped, ch) {
+                    (true, _) => self.escaped = false,
+                    (false, '\\') => self.escaped = true,
+                    (false, '"') => self.in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match ch {
+                '"' => self.in_string = true,
+                '(' | '[' | '{' => self.depth += 1,
+                ')' | ']' | '}' => self.depth = self.depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+
+    fn open(&self) -> bool {
+        self.in_string || self.depth > 0
+    }
 }

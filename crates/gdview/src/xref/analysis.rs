@@ -830,51 +830,7 @@ fn normalize_res(relative: &str) -> Option<ResPath> {
     ResPath::from_relative(&segments.join("/")).ok()
 }
 
-/// Up to three names within a small edit distance of `name` (a third of its
-/// length, between 1 and 3 edits), closest first.
+/// Up to three names within a small edit distance of `name`, closest first.
 fn similar<'n>(name: &str, candidates: impl Iterator<Item = &'n str>) -> Vec<String> {
-    let limit = (name.chars().count() / 3).clamp(1, 3);
-    let mut scored: Vec<(usize, &str)> = candidates
-        .filter(|candidate| *candidate != name)
-        .map(|candidate| {
-            (
-                edit_distance(&name.to_lowercase(), &candidate.to_lowercase()),
-                candidate,
-            )
-        })
-        .filter(|(distance, _)| *distance <= limit)
-        .collect();
-    scored.sort();
-    scored.dedup();
-    scored
-        .into_iter()
-        .take(3)
-        .map(|(_, candidate)| candidate.to_owned())
-        .collect()
-}
-
-/// Optimal string alignment distance: Levenshtein plus adjacent transpositions,
-/// so the commonest typo (`Lable`) is one edit away.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    let mut rows = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for (i, row) in rows.iter_mut().enumerate() {
-        row[0] = i;
-    }
-    for (j, cell) in rows[0].iter_mut().enumerate() {
-        *cell = j;
-    }
-    for i in 1..=a.len() {
-        for j in 1..=b.len() {
-            let cost = usize::from(a[i - 1] != b[j - 1]);
-            let mut best = (rows[i - 1][j] + 1)
-                .min(rows[i][j - 1] + 1)
-                .min(rows[i - 1][j - 1] + cost);
-            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                best = best.min(rows[i - 2][j - 2] + 1);
-            }
-            rows[i][j] = best;
-        }
-    }
-    rows[a.len()][b.len()]
+    crate::similar::similar(name, candidates, 3)
 }

@@ -8,7 +8,7 @@ pub enum Error {
     #[error("{path}: {message}")]
     Config { path: PathBuf, message: String },
     #[error(
-        "no engine configured; pass --godot <path>, set GDKIT_GODOT, or add `[engine]` with `executable = \"<path>\"` to gdkit.toml"
+        "no engine configured; run `gdkit config set godot <path>` for a default, or pass --godot <path>, set GDKIT_GODOT, or add `[engine]` with `executable = \"<path>\"` to gdkit.toml"
     )]
     NoEngine,
     #[error("Godot executable not found: {0}")]
@@ -19,6 +19,9 @@ pub enum Error {
     Probe { message: String, output: String },
     #[error("could not run engine: {0}")]
     Spawn(#[source] std::io::Error),
+    /// A raw engine run (no harness) that exited unsuccessfully or wrote nothing usable.
+    #[error("{what} failed: {message}")]
+    EngineRun { what: String, message: String },
     #[error("{what} exceeded its deadline of {deadline:?}")]
     Timeout { what: String, deadline: Duration },
     #[error("harness {harness}: {source}")]

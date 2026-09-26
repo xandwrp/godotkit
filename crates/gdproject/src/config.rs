@@ -1,4 +1,4 @@
-//! `gdkit.toml` and engine selection.
+//! `gdkit.toml` and engine selection (which also consults [`crate::global`]).
 //!
 //! # Tests (tests/config.rs)
 //! - `load_returns_none_when_missing_and_error_when_malformed`
@@ -12,6 +12,9 @@
 //! - `write_initial_refuses_to_overwrite_and_stores_the_path_as_given`
 //! - `write_initial_stores_bare_names_bare_for_path_lookup`
 //! - `write_initial_keeps_symlinks_and_the_absolute_path_as_given`
+//! - `symlinks_are_canonicalized_for_selection_but_never_overwritten`
+//! - `concurrent_initialization_has_exactly_one_winner`
+//! - `write_initial_unpinned_leaves_the_engine_to_the_global_default`
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
@@ -19,6 +22,8 @@ use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::global::GlobalConfig;
 
 pub const CONFIG_FILE_NAME: &str = "gdkit.toml";
 
@@ -185,28 +190,68 @@ impl Config {
         let executable = stored_engine_path(root, engine)
             .map_err(io_error(engine))?
             .ok_or_else(|| config_error(&path, "engine.executable must be valid UTF-8"))?;
-        let config = Self {
-            engine: Some(EngineConfig { executable }),
-            ..Self::default()
-        };
-        let text = toml::to_string_pretty(&config).map_err(|error| config_error(&path, error))?;
-        // create_new also refuses symlinks, including dangling ones, without a check/write race.
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|source| crate::Error::Io {
-                path: path.clone(),
-                source,
-            })?;
-        file.write_all(text.as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|source| crate::Error::Io {
-                path: path.clone(),
-                source,
-            })?;
+        #[derive(Serialize)]
+        struct Pinned {
+            engine: EngineConfig,
+        }
+        let engine = toml::to_string_pretty(&Pinned {
+            engine: EngineConfig { executable },
+        })
+        .map_err(|error| config_error(&path, error))?;
+        publish_new(&path, &format!("{PINNED_HEADER}{engine}"))?;
         Ok(path)
     }
+
+    /// Writes a fresh config with no `[engine]`, so the project follows
+    /// `GDKIT_GODOT` or the global default. The file carries a commented-out
+    /// `[engine]` table showing how to pin one. Fails if the file exists.
+    pub fn write_initial_unpinned(root: &Path) -> crate::Result<PathBuf> {
+        let path = root.join(CONFIG_FILE_NAME);
+        fs::canonicalize(root).map_err(|source| crate::Error::Io {
+            path: root.to_owned(),
+            source,
+        })?;
+        publish_new(&path, UNPINNED_TEMPLATE)?;
+        Ok(path)
+    }
+}
+
+const PINNED_HEADER: &str = "\
+# gdkit project config.
+#
+# [engine] pins this project's Godot editor. Remove it to use the global
+# default instead (`gdkit config set godot <path>`).
+
+";
+
+const UNPINNED_TEMPLATE: &str = "\
+# gdkit project config.
+#
+# No [engine] table, so this project uses GDKIT_GODOT or the global default
+# (`gdkit config set godot <path>`).
+#
+# To check the global default:
+# `gdkit config get godot`
+#
+# To pin this project to one engine:
+# [engine]
+# executable = \"/path/to/godot\"
+";
+
+fn publish_new(path: &Path, text: &str) -> crate::Result<()> {
+    let io_error = |source| crate::Error::Io {
+        path: path.to_owned(),
+        source,
+    };
+    // create_new also refuses symlinks, including dangling ones, without a check/write race.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(io_error)?;
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(io_error)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +260,7 @@ pub enum SelectionSource {
     CommandLine,
     Environment,
     ProjectConfig,
+    GlobalConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -226,24 +272,26 @@ pub struct EngineSelection {
 
 /// Precedence: `explicit` (`--godot`) > `env` (`GDKIT_GODOT`, passed in for
 /// testability; empty or whitespace-only counts as unset) > `[engine] executable`
-/// in `gdkit.toml`.
+/// in `gdkit.toml` > `[engine] executable` in the user's global config.
 ///
 /// The winning value is then resolved: a bare name without a path separator
 /// (`godot`) is looked up on the process `PATH` (honouring `PATHEXT` on Windows).
 /// Anything with a separator is a path: flag and environment values are relative
-/// to the current directory, config values to the directory containing
-/// `gdkit.toml`. The result is canonicalized.
+/// to the current directory, config values to the directory containing their
+/// config file. The result is canonicalized.
 pub fn select_engine(
     root: &Path,
     explicit: Option<&Path>,
     env: Option<&OsString>,
     config: Option<&Config>,
+    global: Option<&GlobalConfig>,
 ) -> crate::Result<EngineSelection> {
     select_engine_with_search_path(
         root,
         explicit,
         env,
         config,
+        global,
         std::env::var_os("PATH").as_deref(),
     )
 }
@@ -254,6 +302,7 @@ pub fn select_engine_with_search_path(
     explicit: Option<&Path>,
     env: Option<&OsString>,
     config: Option<&Config>,
+    global: Option<&GlobalConfig>,
     search_path: Option<&OsStr>,
 ) -> crate::Result<EngineSelection> {
     let env = env.filter(|value| !value.to_str().is_some_and(|text| text.trim().is_empty()));
@@ -270,6 +319,15 @@ pub fn select_engine_with_search_path(
             root,
             SelectionSource::ProjectConfig,
         )
+    } else if let Some((engine, directory)) = global.and_then(|global| {
+        let directory = global.path.parent()?;
+        Some((global.engine.as_ref()?, directory))
+    }) {
+        (
+            engine.executable.as_path(),
+            directory,
+            SelectionSource::GlobalConfig,
+        )
     } else {
         return Err(crate::Error::NoEngine);
     };
@@ -279,14 +337,14 @@ pub fn select_engine_with_search_path(
     })
 }
 
-fn config_error(path: &Path, message: impl std::fmt::Display) -> crate::Error {
+pub(crate) fn config_error(path: &Path, message: impl std::fmt::Display) -> crate::Error {
     crate::Error::Config {
         path: path.to_owned(),
         message: message.to_string(),
     }
 }
 
-fn reject_unknown_keys(
+pub(crate) fn reject_unknown_keys(
     value: &toml::Value,
     prefix: &str,
     allowed: &[&str],
@@ -311,7 +369,7 @@ fn reject_unknown_keys(
 }
 
 /// Bare names use `search_path`; other relative paths are joined to `base`.
-fn resolve_executable(
+pub(crate) fn resolve_executable(
     value: &Path,
     base: &Path,
     search_path: Option<&OsStr>,
@@ -334,7 +392,7 @@ fn canonical_engine(path: &Path) -> crate::Result<PathBuf> {
 }
 
 /// One normal component and no separator anywhere (`godot`, not `./godot` or `godot/`).
-fn is_bare_name(path: &Path) -> bool {
+pub(crate) fn is_bare_name(path: &Path) -> bool {
     let mut components = path.components();
     matches!(
         (components.next(), components.next()),
@@ -433,7 +491,7 @@ fn stored_engine_path(root: &Path, engine: &Path) -> std::io::Result<Option<Path
 
 /// Absolute against the current directory with `.` and `..` removed, without
 /// touching the filesystem, so symlinks are preserved.
-fn lexical_absolute(path: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn lexical_absolute(path: &Path) -> std::io::Result<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in std::path::absolute(path)?.components() {
         match component {

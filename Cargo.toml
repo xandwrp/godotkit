@@ -1,6 +1,32 @@
+[package]
+name = "gdkit"
+description = "Godot development utility belt. Thin CLI over gdproject and gdview."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "gdkit"
+path = "src/main.rs"
+
+[dependencies]
+gdview.workspace = true
+gdproject.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anstream.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
+
 [workspace]
 resolver = "3"
-members = ["crates/gdview", "crates/gdproject", "crates/gdkit"]
+members = ["crates/gdview", "crates/gdproject"]
 exclude = ["legacy"]
 
 [workspace.package]
@@ -17,7 +43,9 @@ serde_json = "1"
 thiserror = "2"
 blake3 = "1.8"
 toml = "0.8"
+toml_edit = "0.22"
 ignore = "0.4"
+quick-xml = "0.37"
 clap = { version = "4", features = ["derive"] }
 anstream = "1"
 unicode-ident = "1"

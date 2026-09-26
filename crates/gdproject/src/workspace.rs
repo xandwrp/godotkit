@@ -47,6 +47,11 @@ use gdview::Project;
 
 use crate::{Error, Result};
 
+/// State files under `<root>/.godot/gdkit`.
+pub const PROBE_CACHE_FILE: &str = "engine-probe.json";
+pub const API_CACHE_FILE: &str = "api-index.json";
+pub const API_SCRIPTS_CACHE_FILE: &str = "api-scripts.json";
+
 pub struct Workspace {
     project: Project,
     state_dir: PathBuf,
@@ -72,10 +77,35 @@ impl Workspace {
         &self.state_dir
     }
     pub fn probe_cache_path(&self) -> PathBuf {
-        self.state_dir.join("engine-probe.json")
+        self.state_dir.join(PROBE_CACHE_FILE)
     }
     pub fn api_cache_path(&self) -> PathBuf {
-        self.state_dir.join("api-index.json")
+        self.state_dir.join(API_CACHE_FILE)
+    }
+    /// Atomically replaces `<state>/<name>`: readers see the old or the new
+    /// bytes, never a partial file, and a failed write leaves no temp file.
+    /// Concurrent writers need no lock; the last rename wins.
+    pub fn replace_state_file(&self, name: &str, bytes: &[u8]) -> Result<PathBuf> {
+        let relative = Path::new(name);
+        validate_relative(relative, false)?;
+        if relative.components().count() != 1 {
+            return Err(Error::Invalid("state file must be a single name".into()));
+        }
+        ensure_directory(&self.state_dir)?;
+        let path = self.state_dir.join(relative);
+        refuse_existing_nonfile(&path)?;
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| Error::Invalid(error.to_string()))?
+            .as_nanos();
+        let temporary = self
+            .state_dir
+            .join(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
+        write_new(&temporary, bytes)?;
+        let rename = replace_with(&temporary, &path);
+        let _ = fs::remove_file(&temporary);
+        rename.map_err(|e| io_error(&path, e))?;
+        Ok(path)
     }
     /// Exclusive, nonblocking lock for operations that write the real `.godot`.
     pub fn lock(&self) -> Result<Lock> {
@@ -186,6 +216,11 @@ impl IsolatedCopy {
         Ok(Self::new(unique_directory(&temp, SCRATCH_PREFIX)?))
     }
 
+    /// An empty directory with no `project.godot`, so an engine started in it
+    /// sees no project (`--dump-extension-api-with-docs`, `--doctool`).
+    pub fn bare() -> Result<Self> {
+        Self::allocate()
+    }
     /// A bare `project.godot` with `config_version=5`.
     pub fn empty() -> Result<Self> {
         let copy = Self::allocate()?;
@@ -279,6 +314,15 @@ impl Drop for IsolatedCopy {
         #[cfg(not(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64"))))]
         let _ = fs::remove_dir_all(&self.allocated);
     }
+}
+
+/// Renames `temporary` over `path`; Windows cannot rename onto an existing file.
+fn replace_with(temporary: &Path, path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    fs::rename(temporary, path)
 }
 
 fn io_error(path: &Path, source: io::Error) -> Error {

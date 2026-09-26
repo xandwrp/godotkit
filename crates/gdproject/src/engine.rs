@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::config::EngineSelection;
-use crate::workspace::Workspace;
+use crate::workspace::{PROBE_CACHE_FILE, Workspace};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Engine {
@@ -86,37 +86,9 @@ impl Engine {
         ensure_unchanged(&selection.executable, &key)?;
         let record = ProbeCache { key, report };
         let bytes = serde_json::to_vec(&record)?;
-        let path = workspace.probe_cache_path();
-        // The workspace lock serializes writers; rename keeps readers from seeing
-        // a partially written record. A failed publication never leaves a temp file.
-        let temporary = path.with_extension(format!(
-            "json.{}.{}.tmp",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|error| crate::Error::Invalid(error.to_string()))?
-                .as_nanos(),
-        ));
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|source| crate::Error::Io {
-                path: temporary.clone(),
-                source,
-            })?;
-        let write = (|| {
-            use std::io::Write;
-            file.write_all(&bytes)?;
-            drop(file);
-            #[cfg(windows)]
-            if path.exists() {
-                fs::remove_file(&path)?;
-            }
-            fs::rename(&temporary, &path)
-        })();
-        let _ = fs::remove_file(&temporary);
-        write.map_err(|source| crate::Error::Io { path, source })?;
+        // The workspace lock serializes writers; the atomic replace keeps readers
+        // from seeing a partially written record.
+        workspace.replace_state_file(PROBE_CACHE_FILE, &bytes)?;
         Ok((result, false))
     }
 

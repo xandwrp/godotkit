@@ -8,7 +8,7 @@
 //! The crate is layered bottom-up. Lower modules never import higher ones.
 //!
 //! ```text
-//! respath, settings, syntax, variant, api          (pure: bytes/str in, data out)
+//! respath, settings, similar, syntax, variant, api (pure: bytes/str in, data out)
 //!   └─ files, autoload, scene, declarations, uid   (need a Project or a parsed file)
 //!        └─ xref, net                              (cross-file analysis over the above)
 //! ```
@@ -25,6 +25,7 @@ pub mod project;
 pub mod respath;
 pub mod scene;
 pub mod settings;
+pub mod similar;
 pub mod syntax;
 pub mod uid;
 pub mod variant;

@@ -401,11 +401,8 @@ fn class(name: &str, parent: Option<&str>, methods: &[&str]) -> ApiClass {
     ApiClass {
         name: name.into(),
         parent: parent.map(str::to_owned),
-        is_builtin: false,
-        is_refcounted: false,
         instantiable: true,
         api_type: "core".into(),
-        brief: None,
         methods: methods
             .iter()
             .map(|name| ApiMethod {
@@ -413,10 +410,12 @@ fn class(name: &str, parent: Option<&str>, methods: &[&str]) -> ApiClass {
                 is_static: false,
                 is_const: false,
                 is_virtual: false,
+                is_required: false,
                 is_vararg: false,
                 return_type: ApiType::Void,
                 arguments: vec![],
-                brief: None,
+                description: None,
+                ..ApiMethod::default()
             })
             .collect(),
         properties: vec![ApiProperty {
@@ -424,11 +423,11 @@ fn class(name: &str, parent: Option<&str>, methods: &[&str]) -> ApiClass {
             type_: ApiType::Variant,
             getter: None,
             setter: None,
-            brief: None,
+            default: None,
+            description: None,
+            ..ApiProperty::default()
         }],
-        signals: vec![],
-        enums: vec![],
-        constants: vec![],
+        ..ApiClass::default()
     }
 }
 
@@ -446,10 +445,7 @@ fn suggestions_for_nonexistent_function_come_from_the_api_index() {
             ("Node".into(), class("Node", Some("Child"), &["queue_free"])),
         ]),
         builtin_classes: BTreeMap::from([("String".into(), class("String", None, &["split"]))]),
-        utility_functions: vec![],
-        global_enums: vec![],
-        singletons: vec![],
-        extension_classes: vec![],
+        ..ApiIndex::default()
     };
     let mut parsed = diagnostics::parse(
         &capture(&[

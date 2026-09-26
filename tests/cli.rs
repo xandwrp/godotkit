@@ -5,20 +5,37 @@
 // This works for both `cargo test -p gdkit` and `cargo test --workspace`, without
 // relying on Cargo building dependency binaries or a pre-existing sibling binary.
 // Every test copies the executable and its scenario; no process-global env changes.
+// Every run gets its own GDKIT_CONFIG_DIR, so the developer's global config is
+// never read or written.
 #![allow(unused)]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// Runs the binary with an engine variable that points nowhere, so any
-/// accidental engine use fails loudly.
+use clap::CommandFactory;
+
+// The status table and the clap tree it describes, compiled into this test so
+// the drift test can walk every command without a hand-kept list.
+#[path = "../src/cli.rs"]
+mod cli;
+#[path = "../src/status.rs"]
+mod status;
+
+/// The binary with `config_dir` as its global config and an engine variable
+/// that points nowhere, so any accidental engine use fails loudly.
+fn gdkit_command(config_dir: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gdkit"));
+    command
+        .env("GDKIT_CONFIG_DIR", config_dir)
+        .env("GDKIT_GODOT", "/nonexistent/godot");
+    command
+}
+
+/// Runs the binary with an empty global config.
 fn gdkit(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gdkit"))
-        .args(args)
-        .env("GDKIT_GODOT", "/nonexistent/godot")
-        .output()
-        .unwrap()
+    let config = tempfile::tempdir().unwrap();
+    gdkit_command(config.path()).args(args).output().unwrap()
 }
 
 fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
@@ -211,10 +228,288 @@ fn scene_tree_autoloads_refs_settings_net_and_static_check_need_no_engine() {
     todo!()
 }
 
+fn succeeded(output: &Output) -> serde_json::Value {
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "JSON mode printed to stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn tool_error(output: &Output) -> String {
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+    assert!(stderr.starts_with("error: "), "{stderr}");
+    stderr
+}
+
+/// Reports a Godot 3 build, which the compatibility probe rejects.
+fn godot_3() -> Fake {
+    Fake::new(
+        serde_json::json!({"probe": {"payload": {"version": "3.6.stable", "major": 3, "editor": true}}}),
+    )
+}
+
 #[test]
-#[ignore = "scaffold"]
 fn init_writes_config_and_refuses_to_overwrite() {
-    todo!()
+    let fake = Fake::new(serde_json::json!({}));
+    let dir = project(&[("scripts/ok.gd", "extends Node\n")]);
+    let config = dir.path().join("gdkit.toml");
+    // Nothing selects an engine: the error says how to set a default, and nothing is written.
+    let stderr = tool_error(
+        &fake
+            .gdkit()
+            .args(["init", "--project"])
+            .arg(dir.path())
+            .output()
+            .unwrap(),
+    );
+    assert!(stderr.contains("gdkit config set godot"), "{stderr}");
+    // A wrong or incompatible engine is caught by the probe before anything is written.
+    let old = godot_3();
+    for godot in [Path::new("/nonexistent/godot"), old.executable.as_path()] {
+        tool_error(
+            &fake
+                .gdkit()
+                .args(["init", "--project"])
+                .arg(dir.path())
+                .arg("--godot")
+                .arg(godot)
+                .output()
+                .unwrap(),
+        );
+        assert!(!config.exists());
+    }
+    // --godot pins, from anywhere inside the project.
+    let value = succeeded(
+        &fake
+            .gdkit()
+            .args(["init", "--output", "json", "--project"])
+            .arg(dir.path().join("scripts"))
+            .arg("--godot")
+            .arg(&fake.executable)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(value["pinned"], true);
+    assert_eq!(value["engine"]["source"], "command_line");
+    assert_eq!(
+        fs::canonicalize(value["config"].as_str().unwrap()).unwrap(),
+        fs::canonicalize(&config).unwrap()
+    );
+    let written = fs::read_to_string(&config).unwrap();
+    assert!(
+        written.contains(&format!(
+            "executable = {:?}",
+            fake.executable.to_str().unwrap()
+        )),
+        "{written}"
+    );
+    // A second init refuses before probing and leaves the file alone.
+    fake.take_log();
+    let stderr = tool_error(
+        &fake
+            .gdkit()
+            .args(["init", "--project"])
+            .arg(dir.path())
+            .arg("--godot")
+            .arg(&fake.executable)
+            .output()
+            .unwrap(),
+    );
+    assert!(stderr.contains("already exists"), "{stderr}");
+    assert!(fake.take_log().is_empty(), "init probed before refusing");
+    assert_eq!(fs::read_to_string(&config).unwrap(), written);
+    // The pin beats a global default.
+    let other = Fake::new(serde_json::json!({}));
+    succeeded(
+        &other
+            .gdkit()
+            .args(["config", "set", "godot", "--output", "json"])
+            .arg(&other.executable)
+            .output()
+            .unwrap(),
+    );
+    let value = report(
+        &fake
+            .command(dir.path())
+            .env_remove("GDKIT_GODOT")
+            .env("GDKIT_CONFIG_DIR", other.config_dir())
+            .args(["--output", "json"])
+            .output()
+            .unwrap(),
+        0,
+        "passed",
+    );
+    assert_eq!(
+        fs::canonicalize(value["engine"]["executable"].as_str().unwrap()).unwrap(),
+        fs::canonicalize(&fake.executable).unwrap()
+    );
+}
+
+#[test]
+fn init_without_godot_follows_the_global_default() {
+    let fake = Fake::new(serde_json::json!({}));
+    let dir = project(&[]);
+    succeeded(
+        &fake
+            .gdkit()
+            .args(["config", "set", "godot", "--output", "json"])
+            .arg(&fake.executable)
+            .output()
+            .unwrap(),
+    );
+    let output = fake
+        .gdkit()
+        .args(["init", "--project"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("follows the global default"), "{stdout}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.starts_with("engine: "), "{stderr}");
+    // No [engine] table, only the commented example of how to pin one.
+    let written = fs::read_to_string(dir.path().join("gdkit.toml")).unwrap();
+    assert!(
+        !written.lines().any(|line| line.starts_with("[engine]")),
+        "{written}"
+    );
+    assert!(written.contains("# [engine]"), "{written}");
+    let check = || {
+        fake.command(dir.path())
+            .env_remove("GDKIT_GODOT")
+            .args(["--output", "json"])
+            .output()
+            .unwrap()
+    };
+    let engine = |output: &Output| {
+        let value = report(output, 0, "passed");
+        fs::canonicalize(value["engine"]["executable"].as_str().unwrap()).unwrap()
+    };
+    assert_eq!(
+        engine(&check()),
+        fs::canonicalize(&fake.executable).unwrap()
+    );
+    // Changing the global default moves the project with it.
+    let other = Fake::new(serde_json::json!({}));
+    succeeded(
+        &fake
+            .gdkit()
+            .args(["config", "set", "godot", "--output", "json"])
+            .arg(&other.executable)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        engine(&check()),
+        fs::canonicalize(&other.executable).unwrap()
+    );
+    // GDKIT_GODOT still overrides it.
+    let overridden = fake
+        .command(dir.path())
+        .args(["--output", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        engine(&overridden),
+        fs::canonicalize(&fake.executable).unwrap()
+    );
+    // Without a global default the project has no engine.
+    succeeded(
+        &fake
+            .gdkit()
+            .args(["config", "unset", "godot", "--output", "json"])
+            .output()
+            .unwrap(),
+    );
+    assert!(tool_error(&check()).contains("gdkit config set godot"));
+}
+
+#[test]
+fn config_set_get_unset_list_round_trip() {
+    let fake = Fake::new(serde_json::json!({}));
+    let file = fake.config_dir().join("config.toml");
+    let exe = fake.executable.to_str().unwrap();
+    let config = |args: &[&str]| fake.gdkit().arg("config").args(args).output().unwrap();
+    // Unset: `get` exits 1 with nothing on stdout; `list` shows the file and the gap.
+    let get = config(&["get", "godot"]);
+    assert_eq!(get.status.code(), Some(1));
+    assert!(get.stdout.is_empty() && get.stderr.is_empty());
+    let get = config(&["get", "godot", "--output", "json"]);
+    assert_eq!(get.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&get.stdout).unwrap();
+    assert_eq!(value["value"], serde_json::Value::Null);
+    let list = succeeded(&config(&["list", "--output", "json"]));
+    assert_eq!(list["path"], file.to_str().unwrap());
+    assert_eq!(list["values"]["godot"], serde_json::Value::Null);
+    // `set` probes first: a missing or incompatible engine is never saved.
+    let old = godot_3();
+    for godot in ["/nonexistent/godot", old.executable.to_str().unwrap()] {
+        tool_error(&config(&["set", "godot", godot]));
+        assert!(!file.exists());
+    }
+    tool_error(&config(&["get", "bogus"]));
+    // Human `set` names the engine on stderr and the saved value on stdout.
+    let set = config(&["set", "godot", exe]);
+    assert_eq!(set.status.code(), Some(0));
+    let stdout = String::from_utf8(set.stdout).unwrap();
+    assert!(stdout.starts_with(&format!("godot = {exe}\n")), "{stdout}");
+    assert!(
+        String::from_utf8(set.stderr)
+            .unwrap()
+            .starts_with("engine: ")
+    );
+    let get = config(&["get", "godot"]);
+    assert_eq!(get.status.code(), Some(0));
+    assert_eq!(String::from_utf8(get.stdout).unwrap(), format!("{exe}\n"));
+    assert_eq!(
+        succeeded(&config(&["list", "--output", "json"]))["values"]["godot"],
+        exe
+    );
+    // Hand edits survive later `set`s.
+    let text = fs::read_to_string(&file).unwrap();
+    fs::write(&file, format!("# my defaults\n{text}")).unwrap();
+    let value = succeeded(&config(&["set", "godot", exe, "--output", "json"]));
+    assert_eq!(value["value"], exe);
+    assert_eq!(value["engine"]["source"], "command_line");
+    assert!(
+        fs::read_to_string(&file)
+            .unwrap()
+            .starts_with("# my defaults\n")
+    );
+    // `unset` is idempotent.
+    assert_eq!(
+        succeeded(&config(&["unset", "godot", "--output", "json"]))["removed"],
+        true
+    );
+    assert_eq!(config(&["get", "godot"]).status.code(), Some(1));
+    assert_eq!(
+        succeeded(&config(&["unset", "godot", "--output", "json"]))["removed"],
+        false
+    );
+    // A broken file is a tool error for every subcommand and is left as it is.
+    fs::write(&file, "godot = 1\n").unwrap();
+    for args in [
+        vec!["get", "godot"],
+        vec!["list"],
+        vec!["unset", "godot"],
+        vec!["set", "godot", exe],
+    ] {
+        let stderr = tool_error(&config(&args));
+        assert!(stderr.contains("config.toml"), "{args:?}: {stderr}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "godot = 1\n");
+    }
 }
 
 /// Path of the fake engine executable. A failed build is cached, so every
@@ -236,7 +531,7 @@ fn build_fake_binary() -> Result<std::path::PathBuf, String> {
     let file = |path: &Path| fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()));
     let mut child = Command::new(env!("CARGO"))
         .args(["build", "--offline", "--locked", "--manifest-path"])
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdproject/Cargo.toml"))
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/gdproject/Cargo.toml"))
         .args([
             "--features",
             "test-engine",
@@ -316,14 +611,27 @@ impl Fake {
         Self { dir, executable }
     }
 
+    /// This fake's global config directory; empty until a test writes to it.
+    fn config_dir(&self) -> PathBuf {
+        self.dir.path().join("config")
+    }
+
+    /// gdkit with this fake's global config and no GDKIT_GODOT.
+    fn gdkit(&self) -> Command {
+        let mut command = gdkit_command(&self.config_dir());
+        command
+            .env_remove("GDKIT_GODOT")
+            .env_remove("FAKE_GODOT_SCENARIO")
+            .env_remove("FAKE_GODOT_LOG");
+        command
+    }
+
     fn command(&self, root: &Path) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_gdkit"));
+        let mut command = self.gdkit();
         command
             .args(["check", "--project"])
             .arg(root)
-            .env("GDKIT_GODOT", &self.executable)
-            .env_remove("FAKE_GODOT_SCENARIO")
-            .env_remove("FAKE_GODOT_LOG");
+            .env("GDKIT_GODOT", &self.executable);
         command
     }
 
@@ -807,4 +1115,243 @@ fn missing_slice_is_rejected_before_the_engine_is_probed() {
         "passed",
     );
     assert_eq!(value["project"]["sliced"], true);
+}
+
+/// Valid arguments that reach the command's handler, for every leaf command.
+fn smoke_args(path: &str, dir: &Path) -> Vec<String> {
+    let root = dir.to_str().unwrap();
+    let args: Vec<&str> = match path {
+        "init" | "doctor" | "check" | "autoloads" | "net" | "import" | "run" => {
+            vec![path, "--project", root]
+        }
+        "api" => vec!["api", "--project", root, "Node"],
+        "config get" | "config unset" => vec!["config", &path[7..], "godot"],
+        "config set" => vec!["config", "set", "godot", "/nonexistent/godot"],
+        "config list" => vec!["config", "list"],
+        "refs" => vec!["refs", "--project", root, "res://main.tscn"],
+        "settings get" => vec![
+            "settings",
+            "--project",
+            root,
+            "get",
+            "application",
+            "config/name",
+        ],
+        "resource schema" => vec![
+            "resource",
+            "schema",
+            "--project",
+            root,
+            "--class",
+            "Resource",
+        ],
+        "resource create" => {
+            let spec = dir.join("spec.json");
+            return ["resource", "create", "--project", root, "--spec"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain([
+                    spec.to_str().unwrap().to_owned(),
+                    "--out".into(),
+                    "res://x.tres".into(),
+                ])
+                .collect();
+        }
+        "scene-tree" => {
+            let scene = dir.join("main.tscn");
+            return vec!["scene-tree".into(), scene.to_str().unwrap().to_owned()];
+        }
+        _ => match path.strip_prefix("settings ") {
+            Some(what) => vec!["settings", "--project", root, what],
+            None => panic!("add smoke args for `{path}` to smoke_args in tests/cli.rs"),
+        },
+    };
+    args.into_iter().map(str::to_owned).collect()
+}
+
+fn panicked(output: &Output) -> bool {
+    output.status.code() == Some(101)
+        && String::from_utf8_lossy(&output.stderr).contains("panicked")
+}
+
+#[test]
+fn status_table_matches_what_each_command_does() {
+    let dir = project(&[
+        (
+            "main.tscn",
+            "[gd_scene format=3]\n\n[node name=\"Main\" type=\"Node\"]\n",
+        ),
+        ("spec.json", "{}"),
+    ]);
+    for path in status::leaves(&cli::Cli::command(), "") {
+        let args = smoke_args(&path, dir.path());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match status::of(&path) {
+            status::Status::Ready => {
+                let output = gdkit(&args);
+                assert!(
+                    !panicked(&output),
+                    "`{path}` is marked Ready in src/status.rs but panics:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            status::Status::Stub => {
+                let output = gdkit(&args);
+                assert_eq!(output.status.code(), Some(2), "`{path}`");
+                assert!(output.stdout.is_empty(), "`{path}`");
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stderr),
+                    format!("error: `gdkit {path}` is not implemented yet\n")
+                );
+                // The unlock only exists in debug builds.
+                if cfg!(debug_assertions) {
+                    let config = tempfile::tempdir().unwrap();
+                    let output = gdkit_command(config.path())
+                        .args(&args)
+                        .env("GDKIT_ALLOW_STUBS", "1")
+                        .output()
+                        .unwrap();
+                    assert!(
+                        panicked(&output),
+                        "`{path}` no longer panics; mark it Ready in src/status.rs"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn help_tags_every_command_that_is_not_ready() {
+    let command = cli::Cli::command();
+    let help = String::from_utf8(gdkit(&["--help"]).stdout).unwrap();
+    assert!(
+        !help.contains('\x1b'),
+        "piped help must not carry color codes"
+    );
+    for sub in command.get_subcommands() {
+        let name = sub.get_name();
+        let line = help
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("`{name}` missing from help:\n{help}"));
+        match status::tag(sub, name) {
+            Some(tag) => assert!(line.ends_with(&format!("({tag})")), "{line}"),
+            None => assert!(!line.ends_with("implemented)"), "{line}"),
+        }
+    }
+}
+
+/// The fake engine's outputs for `api`: the trimmed 4.7.2 dump and doctool
+/// fixtures from gdview, plus docs for one project script.
+fn api_fake() -> Fake {
+    let fixture = |name: &str| {
+        fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("crates/gdview/tests/fixtures/api")
+                .join(name),
+        )
+        .unwrap()
+    };
+    Fake::new(serde_json::json!({
+        "--dump-extension-api-with-docs": {
+            "files": {"extension_api.json": fixture("extension_api.json")}
+        },
+        "--doctool": {"files": {
+            "modules/gdscript/doc_classes/@GDScript.xml": fixture("doctool/@GDScript.xml"),
+            "doc/classes/Node.xml": fixture("doctool/Node.xml"),
+        }},
+        "--gdscript-docs": {"files": {
+            "Player.xml": "<class name=\"Player\" inherits=\"CharacterBody3D\"><brief_description>The hero.</brief_description></class>"
+        }},
+    }))
+}
+
+#[test]
+fn api_exit_codes_follow_the_answer_and_json_is_one_document() {
+    let fake = api_fake();
+    let dir = project(&[("player.gd", "class_name Player\nextends CharacterBody3D\n")]);
+    let api = |args: &[&str]| {
+        fake.gdkit()
+            .arg("api")
+            .arg("--project")
+            .arg(dir.path())
+            .args(args)
+            .env("GDKIT_GODOT", &fake.executable)
+            .output()
+            .unwrap()
+    };
+    let json = |output: &Output, code: i32| -> serde_json::Value {
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    let found = json(
+        &api(&["--output", "json", "CharacterBody3D", "move_and_slide"]),
+        0,
+    );
+    assert_eq!(found["kind"], "member");
+    assert_eq!(
+        found["signature"],
+        "CharacterBody3D.move_and_slide() -> bool"
+    );
+    assert_eq!(found["engine_version"], "4.7.2.stable.arch_linux");
+    assert!(
+        found.get("project_scripts").is_none(),
+        "engine answers skip the scripts"
+    );
+
+    let miss = json(
+        &api(&["--output", "json", "CharacterBody3D", "move_and_slid"]),
+        1,
+    );
+    assert_eq!(miss["kind"], "miss");
+    assert_eq!(miss["suggestions"][0], "move_and_slide");
+
+    let player = json(&api(&["--output", "json", "Player", "move_and_slide"]), 0);
+    assert_eq!(player["declaring_class"], "CharacterBody3D");
+    assert_eq!(player["project_scripts"]["source"], "script_copy");
+
+    let search = json(
+        &api(&["--output", "json", "search", "player", "--limit", "1"]),
+        0,
+    );
+    assert_eq!(search["results"][0]["name"], "Player");
+
+    let human = api(&["lerp"]);
+    assert_eq!(human.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&human.stdout)
+            .starts_with("lerp(from: Variant, to: Variant, weight: Variant) -> Variant")
+    );
+    assert!(String::from_utf8_lossy(&human.stderr).starts_with("engine: "));
+
+    let error = api(&["search"]);
+    assert_eq!(error.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&error.stderr)
+            .starts_with("error: `gdkit api search` needs a term")
+    );
+
+    let outside = tempfile::tempdir().unwrap();
+    let dump = fake
+        .gdkit()
+        .args(["--output", "json", "api", "--dump"])
+        .current_dir(outside.path())
+        .env("GDKIT_GODOT", &fake.executable)
+        .output()
+        .unwrap();
+    let index = json(&dump, 0);
+    assert!(index["classes"]["CharacterBody3D"].is_object());
+    assert!(!outside.path().join(".godot").exists());
 }

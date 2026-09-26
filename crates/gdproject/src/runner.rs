@@ -1,5 +1,6 @@
 //! One engine invocation. Every operation module builds an [`Invocation`] and
-//! calls a capture API, [`run_harness`], [`run_engine`], or [`spawn_game`].
+//! calls a capture API, [`run_harness`], [`run_engine`], [`run_projectless`],
+//! or [`spawn_game`].
 //! ScriptBootstrap uses raw capture: startup is not a completion envelope.
 //!
 //! # Tests (tests/runner.rs, offline with `fake-godot`)
@@ -10,6 +11,7 @@
 //! - `run_harness_maps_missing_envelope_to_error_protocol`
 //! - `run_harness_enforces_deadline_and_reports_timeout_with_partial_output`
 //! - `run_engine_is_the_raw_form_used_for_import_dump_and_run`
+//! - `run_projectless_omits_path_and_runs_in_the_given_directory`
 //! - `temp_files_are_removed_after_every_outcome`
 //! - `harness_scratch_is_removed_when_a_panic_unwinds_while_it_is_live`
 
@@ -323,6 +325,22 @@ fn capture(
 pub fn run_engine(invocation: &Invocation<'_>) -> crate::Result<(Captured, Vec<Diagnostic>)> {
     let mut spawn = engine_spawn(invocation, true);
     append_user_args(&mut spawn, invocation);
+    capture(&spawn, invocation)
+}
+
+/// Engine run with no project: `<engine> --headless --no-header <engine_args…>`
+/// with `invocation.project_dir` as the working directory and no `--path`. For
+/// `--dump-extension-api-with-docs` and `--doctool`, which write relative to
+/// the working directory; under `--path`, Godot 4.7.2 writes the dump into the
+/// project and then aborts. No user arguments are passed.
+pub fn run_projectless(invocation: &Invocation<'_>) -> crate::Result<(Captured, Vec<Diagnostic>)> {
+    let mut spawn = crate::process::Spawn::new(&invocation.engine.executable);
+    spawn
+        .args
+        .extend([OsString::from("--headless"), OsString::from("--no-header")]);
+    spawn.args.extend(invocation.engine_args.iter().cloned());
+    spawn.cwd = Some(invocation.project_dir.to_owned());
+    spawn.env.clone_from(&invocation.env);
     capture(&spawn, invocation)
 }
 
