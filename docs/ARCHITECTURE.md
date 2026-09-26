@@ -12,6 +12,10 @@ gdkit  (bin)  ──►  gdproject  ──►  gdview
 `gdview` never spawns a process or writes a file. `gdproject` spawns only through
 `runner` and writes only under `.godot/gdkit/**`, scratch copies, or brand-new files.
 `gdkit` contains no logic; a command file that grows past ~150 lines is a smell.
+A command is a stub until `src/status.rs` marks it `Ready`: help tags stubs and
+`main` refuses them with exit 2. `status_table_matches_what_each_command_does`
+fails if a `Ready` command panics or a stub stops panicking, so flip the entry
+in the same change that implements the command.
 
 The command surface is exactly what [AGENT_USE.md](AGENT_USE.md) lists. Anything
 not on that page is not stubbed, on purpose. These flows describe the intended

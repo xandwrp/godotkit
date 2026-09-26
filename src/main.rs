@@ -8,6 +8,8 @@
 //!   progress and errors. `--output json` guarantees stdout is exactly one JSON value.
 //! - Exit codes: 0 the thing passed, 1 the thing failed (validation, check, run
 //!   verdict), 2 gdkit could not do its job (config, engine, I/O, protocol).
+//! - A command is a stub until `status::of` marks it `Ready`. Stubs are tagged in
+//!   help and refused with exit 2 before dispatch.
 //!
 //! # Tests (tests/cli.rs, all offline, drive the built binary)
 //! - `no_arguments_prints_help_and_exits_zero`
@@ -17,18 +19,29 @@
 //! - `check_exit_code_follows_report_outcome` (via fake-godot)
 //! - `scene_tree_autoloads_refs_settings_net_and_static_check_need_no_engine`
 //! - `init_writes_config_and_refuses_to_overwrite` (via fake-godot)
+//! - `status_table_matches_what_each_command_does`
+//! - `help_tags_every_command_that_is_not_ready`
 
 mod cli;
 mod commands;
 mod context;
 mod render;
+mod status;
 
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 
 fn main() -> ExitCode {
-    let cli = cli::Cli::parse();
+    let mut command = status::decorate(cli::Cli::command());
+    let matches = command.get_matches_mut();
+    let cli =
+        cli::Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.format(&mut command).exit());
+    let path = status::invoked(&matches);
+    if status::of(&path) == status::Status::Stub && !status::stubs_unlocked() {
+        eprintln!("error: `gdkit {path}` is not implemented yet");
+        return ExitCode::from(2);
+    }
     let context = context::Context::from_env(cli.output);
     match commands::dispatch(&context, cli.command) {
         Ok(exit) => exit.into(),

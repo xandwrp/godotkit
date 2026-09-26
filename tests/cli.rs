@@ -11,6 +11,15 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use clap::CommandFactory;
+
+// The status table and the clap tree it describes, compiled into this test so
+// the drift test can walk every command without a hand-kept list.
+#[path = "../src/cli.rs"]
+mod cli;
+#[path = "../src/status.rs"]
+mod status;
+
 /// Runs the binary with an engine variable that points nowhere, so any
 /// accidental engine use fails loudly.
 fn gdkit(args: &[&str]) -> Output {
@@ -807,4 +816,126 @@ fn missing_slice_is_rejected_before_the_engine_is_probed() {
         "passed",
     );
     assert_eq!(value["project"]["sliced"], true);
+}
+
+/// Valid arguments that reach the command's handler, for every leaf command.
+fn smoke_args(path: &str, dir: &Path) -> Vec<String> {
+    let root = dir.to_str().unwrap();
+    let args: Vec<&str> = match path {
+        "init" | "doctor" | "check" | "autoloads" | "net" | "import" | "run" => {
+            vec![path, "--project", root]
+        }
+        "api" => vec!["api", "--project", root, "Node"],
+        "refs" => vec!["refs", "--project", root, "res://main.tscn"],
+        "settings get" => vec![
+            "settings",
+            "--project",
+            root,
+            "get",
+            "application",
+            "config/name",
+        ],
+        "resource schema" => vec![
+            "resource",
+            "schema",
+            "--project",
+            root,
+            "--class",
+            "Resource",
+        ],
+        "resource create" => {
+            let spec = dir.join("spec.json");
+            return ["resource", "create", "--project", root, "--spec"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain([
+                    spec.to_str().unwrap().to_owned(),
+                    "--out".into(),
+                    "res://x.tres".into(),
+                ])
+                .collect();
+        }
+        "scene-tree" => {
+            let scene = dir.join("main.tscn");
+            return vec!["scene-tree".into(), scene.to_str().unwrap().to_owned()];
+        }
+        _ => match path.strip_prefix("settings ") {
+            Some(what) => vec!["settings", "--project", root, what],
+            None => panic!("add smoke args for `{path}` to smoke_args in tests/cli.rs"),
+        },
+    };
+    args.into_iter().map(str::to_owned).collect()
+}
+
+fn panicked(output: &Output) -> bool {
+    output.status.code() == Some(101)
+        && String::from_utf8_lossy(&output.stderr).contains("panicked")
+}
+
+#[test]
+fn status_table_matches_what_each_command_does() {
+    let dir = project(&[
+        (
+            "main.tscn",
+            "[gd_scene format=3]\n\n[node name=\"Main\" type=\"Node\"]\n",
+        ),
+        ("spec.json", "{}"),
+    ]);
+    for path in status::leaves(&cli::Cli::command(), "") {
+        let args = smoke_args(&path, dir.path());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match status::of(&path) {
+            status::Status::Ready => {
+                let output = gdkit(&args);
+                assert!(
+                    !panicked(&output),
+                    "`{path}` is marked Ready in src/status.rs but panics:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            status::Status::Stub => {
+                let output = gdkit(&args);
+                assert_eq!(output.status.code(), Some(2), "`{path}`");
+                assert!(output.stdout.is_empty(), "`{path}`");
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stderr),
+                    format!("error: `gdkit {path}` is not implemented yet\n")
+                );
+                // The unlock only exists in debug builds.
+                if cfg!(debug_assertions) {
+                    let output = Command::new(env!("CARGO_BIN_EXE_gdkit"))
+                        .args(&args)
+                        .env("GDKIT_GODOT", "/nonexistent/godot")
+                        .env("GDKIT_ALLOW_STUBS", "1")
+                        .output()
+                        .unwrap();
+                    assert!(
+                        panicked(&output),
+                        "`{path}` no longer panics; mark it Ready in src/status.rs"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn help_tags_every_command_that_is_not_ready() {
+    let command = cli::Cli::command();
+    let help = String::from_utf8(gdkit(&["--help"]).stdout).unwrap();
+    assert!(
+        !help.contains('\x1b'),
+        "piped help must not carry color codes"
+    );
+    for sub in command.get_subcommands() {
+        let name = sub.get_name();
+        let line = help
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("`{name}` missing from help:\n{help}"));
+        match status::tag(sub, name) {
+            Some(tag) => assert!(line.ends_with(&format!("({tag})")), "{line}"),
+            None => assert!(!line.ends_with("implemented)"), "{line}"),
+        }
+    }
 }
