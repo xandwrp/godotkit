@@ -8,11 +8,13 @@ use std::time::Duration;
 
 use gdproject::config::SelectionSource;
 use gdproject::engine::Engine;
+use std::collections::BTreeMap;
+
 use gdproject::resource::{self, CreateSpec, DEFAULT_DEADLINE};
 use gdproject::runner::{self, Invocation};
 use gdproject::{Error, Workspace};
 use gdview::ResPath;
-use gdview::variant::{ResourceTarget, VariantType};
+use gdview::variant::{Limits, ResourceTarget, VariantJson, VariantType};
 use serde_json::{Value, json};
 
 fn fake(scenario: Value) -> (tempfile::TempDir, Engine) {
@@ -358,22 +360,396 @@ fn references_must_exist_in_the_project() {
     );
 }
 
+fn decode_map(value: Value) -> BTreeMap<String, VariantJson> {
+    value
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                VariantJson::from_json(value, &Limits::default()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn tag(ty: &str, value: Value) -> Value {
+    json!({"$variant": {"type": ty, "value": value}})
+}
+
 #[test]
-#[ignore = "scaffold"]
+fn echo_comparison_allows_only_lossless_readings_of_the_spec() {
+    let spec = decode_map(json!({
+        "damage": 3,
+        "spread": 2,
+        "offset": tag("Vector2", json!([1, 2.5])),
+        "id": "hero",
+        "path": "../Player",
+        "tags": ["a", "b"],
+        "stats": {"hp": 3},
+        "ammo": {"$resource": {"script": "res://ammo.gd", "properties": {"count": 6}}},
+        "icon": {"$ref": "res://icon.png"},
+        "nan": tag("float", json!("nan")),
+        "nothing": null,
+    }));
+    let echo = decode_map(json!({
+        "damage": 3,
+        "spread": tag("float", json!(2.0)),
+        "offset": tag("Vector2", json!([1.0, 2.5])),
+        "id": tag("StringName", json!("hero")),
+        "path": tag("NodePath", json!("../Player")),
+        "tags": {"$variant": {"type": "Array", "element": "String", "value": ["a", "b"]}},
+        "stats": {"hp": 3},
+        "ammo": {"$resource": {"script": "res://ammo.gd", "properties": {
+            "count": 6, "resource_name": "", "resource_local_to_scene": false,
+        }}},
+        "icon": {"$ref": "res://icon.png"},
+        "nan": tag("float", json!("nan")),
+        "nothing": null,
+        "extra": 1,
+    }));
+    resource::verify_echo(&spec, &echo).unwrap();
+
+    let mismatch = |spec: Value, echo: Value| {
+        resource::verify_echo(&decode_map(spec), &decode_map(echo)).unwrap_err()
+    };
+    let lossy = mismatch(
+        json!({"offset": tag("Vector2", json!([0.1, 2]))}),
+        json!({"offset": tag("Vector2", json!([0.10000000149011612, 2.0]))}),
+    );
+    assert_eq!(lossy.field, "properties.offset[0]");
+    assert_eq!(
+        lossy.message,
+        "the engine stored 0.10000000149011612 where the spec has 0.1"
+    );
+    for (spec, echo, field) in [
+        (
+            json!({"damage": 2.5}),
+            json!({"damage": 2}),
+            "properties.damage",
+        ),
+        (json!({"damage": 3}), json!({}), "properties.damage"),
+        (
+            json!({"zero": tag("float", json!("-0.0"))}),
+            json!({"zero": tag("float", json!(0.0))}),
+            "properties.zero",
+        ),
+        (json!({"name": "3"}), json!({"name": 3}), "properties.name"),
+        (
+            json!({"kind": "Ranged"}),
+            json!({"kind": 5}),
+            "properties.kind",
+        ),
+        (
+            json!({"id": tag("StringName", json!("a"))}),
+            json!({"id": "a"}),
+            "properties.id",
+        ),
+        (
+            json!({"tags": ["a"]}),
+            json!({"tags": ["a", "b"]}),
+            "properties.tags",
+        ),
+        (
+            json!({"tags": ["a", "c"]}),
+            json!({"tags": ["a", "b"]}),
+            "properties.tags[1]",
+        ),
+        (
+            json!({"stats": {"hp": 3}}),
+            json!({"stats": {"hp": 4}}),
+            r#"properties.stats["hp"]"#,
+        ),
+        (
+            json!({"stats": {"hp": 3}}),
+            json!({"stats": {"mp": 3}}),
+            "properties.stats",
+        ),
+        (
+            json!({"ammo": {"$resource": {"script": "res://ammo.gd", "properties": {"count": 6}}}}),
+            json!({"ammo": {"$resource": {"script": "res://ammo.gd", "properties": {"count": 1}}}}),
+            "properties.ammo.properties.count",
+        ),
+        (
+            json!({"ammo": {"$resource": {"script": "res://ammo.gd"}}}),
+            json!({"ammo": {"$resource": {"class": "Resource"}}}),
+            "properties.ammo",
+        ),
+        (
+            json!({"icon": {"$ref": "res://a.png"}}),
+            json!({"icon": {"$ref": "res://b.png"}}),
+            "properties.icon",
+        ),
+        (
+            json!({"icon": {"$ref": "res://a.png"}}),
+            json!({"icon": null}),
+            "properties.icon",
+        ),
+    ] {
+        assert_eq!(mismatch(spec.clone(), echo).field, field, "{spec}");
+    }
+}
+
+/// A project with the scripts and directories the create tests name.
+fn create_project() -> (tempfile::TempDir, Workspace) {
+    project(&[("weapon.gd", "extends Resource\n"), ("weapons/.keep", "")])
+}
+
+fn weapon_spec() -> CreateSpec {
+    CreateSpec::from_json(&json!({
+        "script": "res://weapon.gd",
+        "properties": {"damage": 3, "offset": tag("Vector2", json!([1, 2.5]))},
+    }))
+    .unwrap()
+}
+
+fn shotgun() -> ResPath {
+    ResPath::parse("res://weapons/shotgun.tres").unwrap()
+}
+
+/// Every file under `root` except the gdkit state directory.
+fn files(root: &Path) -> Vec<PathBuf> {
+    snapshot(root)
+        .into_iter()
+        .map(|(path, _)| path)
+        .filter(|path| !path.starts_with(".godot"))
+        .collect()
+}
+
+#[test]
+fn create_stages_beside_the_destination_and_publishes_the_verified_file() {
+    let (_engine_dir, engine) = fake(json!({}));
+    let (dir, workspace) = create_project();
+    let report = resource::create(
+        &workspace,
+        &engine,
+        &weapon_spec(),
+        &shotgun(),
+        DEFAULT_DEADLINE,
+    )
+    .unwrap();
+    assert_eq!(report.path, shotgun());
+    assert_eq!(report.os_path, dir.path().join("weapons/shotgun.tres"));
+    assert_eq!(report.target, script("res://weapon.gd"));
+    assert_eq!(report.properties_written, 2);
+    assert_eq!(
+        serde_json::to_value(&report.properties).unwrap(),
+        json!({"damage": 3, "offset": tag("Vector2", json!([1.0, 2.5]))})
+    );
+    assert_eq!(
+        fs::read_to_string(&report.os_path).unwrap(),
+        "[gd_resource type=\"Resource\" format=3]\n\n[resource]\n"
+    );
+    assert_eq!(
+        files(dir.path()),
+        [
+            PathBuf::from("project.godot"),
+            "weapon.gd".into(),
+            "weapons/.keep".into(),
+            "weapons/shotgun.tres".into(),
+        ]
+    );
+
+    let runs = invocations(&engine);
+    let run = runs.last().unwrap();
+    assert!(run[5].ends_with("/resource_create.gd"), "{run:?}");
+    assert!(!run.iter().any(|arg| arg == "--editor"));
+    let [dash, spec_file, staged] = &run[6..] else {
+        panic!("{run:?}")
+    };
+    assert_eq!(dash, "--");
+    assert!(
+        !Path::new(spec_file).starts_with(dir.path()),
+        "spec file is scratch"
+    );
+    assert!(!Path::new(spec_file).exists(), "scratch is removed");
+    assert_eq!(
+        staged,
+        &format!(
+            "res://weapons/.shotgun.gdkit-staged-{}.tres",
+            std::process::id()
+        )
+    );
+}
+
+#[test]
 fn echo_mismatch_is_a_verify_failure_and_nothing_is_published() {
-    todo!()
+    let (_engine_dir, engine) = fake(json!({"resource_create": {
+        "payload": {"echo": {"damage": 3, "offset": tag("Vector2", json!([1.0, 2.0]))}},
+    }}));
+    let (dir, workspace) = create_project();
+    let error = resource::create(
+        &workspace,
+        &engine,
+        &weapon_spec(),
+        &shotgun(),
+        DEFAULT_DEADLINE,
+    )
+    .unwrap_err();
+    match &error {
+        Error::Harness {
+            harness,
+            stage,
+            field,
+            message,
+        } => {
+            assert_eq!(*harness, "resource_create");
+            assert_eq!(stage, "verify");
+            assert_eq!(field.as_deref(), Some("properties.offset[1]"));
+            assert_eq!(message, "the engine stored 2.0 where the spec has 2.5");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        files(dir.path()),
+        [
+            PathBuf::from("project.godot"),
+            "weapon.gd".into(),
+            "weapons/.keep".into()
+        ]
+    );
 }
 
 #[test]
-#[ignore = "scaffold"]
-fn warnings_do_not_fail_create() {
-    todo!()
+fn engine_diagnostics_are_reported_and_do_not_fail_create() {
+    let (_engine_dir, engine) = fake(json!({"resource_create": {
+        "stderr": "ERROR: AUTOLOAD RAN\nWARNING: deprecated thing\n",
+    }}));
+    let (_dir, workspace) = create_project();
+    let report = resource::create(
+        &workspace,
+        &engine,
+        &weapon_spec(),
+        &shotgun(),
+        DEFAULT_DEADLINE,
+    )
+    .unwrap();
+    let messages: Vec<_> = report
+        .engine_diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(messages, ["AUTOLOAD RAN", "deprecated thing"]);
+    assert!(report.os_path.is_file());
 }
 
 #[test]
-#[ignore = "scaffold"]
 fn staged_file_is_removed_on_every_failure_path() {
-    todo!()
+    let failures = [
+        json!({"mode": "error_envelope", "staged": "saved, then verify failed"}),
+        json!({"mode": "crash", "staged": "saved, then crashed"}),
+        json!({"mode": "no_envelope", "staged": "saved, no envelope"}),
+        json!({"mode": "hang", "staged": "saved, then hung"}),
+        json!({"payload": null, "staged": "saved, empty payload"}),
+        json!({"payload": {"echo": {"damage": 3}}, "staged": "saved, short echo"}),
+        json!({"payload": {"echo": {"damage": {"$variant": {}}}}, "staged": "bad echo"}),
+        json!({"payload": {"echo": {"damage": 3, "offset": tag("Vector2", json!([1, 2.5]))}},
+               "mode": "error_envelope"}),
+    ];
+    for scenario in failures {
+        let (_engine_dir, engine) = fake(json!({"resource_create": scenario.clone()}));
+        let (dir, workspace) = create_project();
+        let deadline = Duration::from_secs(if scenario["mode"] == "hang" { 1 } else { 20 });
+        assert!(
+            resource::create(&workspace, &engine, &weapon_spec(), &shotgun(), deadline).is_err(),
+            "{scenario}"
+        );
+        assert_eq!(
+            files(dir.path()),
+            [
+                PathBuf::from("project.godot"),
+                "weapon.gd".into(),
+                "weapons/.keep".into()
+            ],
+            "{scenario}"
+        );
+    }
+
+    // Success reported without a saved file is a save failure.
+    let (_engine_dir, engine) = fake(json!({"resource_create": {"mode": "no_envelope",
+        "stdout": format!("GDKIT_RESULT:{}\n", json!({"protocol": 1, "harness": "resource_create", "ok": true,
+            "payload": {"echo": {"damage": 3, "offset": tag("Vector2", json!([1.0, 2.5]))}}})),
+    }}));
+    let (dir, workspace) = create_project();
+    match resource::create(
+        &workspace,
+        &engine,
+        &weapon_spec(),
+        &shotgun(),
+        DEFAULT_DEADLINE,
+    ) {
+        Err(Error::Harness { stage, message, .. }) => {
+            assert_eq!(stage, "save");
+            assert!(message.contains("wrote no file"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!dir.path().join("weapons/shotgun.tres").exists());
+}
+
+#[test]
+fn invalid_requests_fail_before_the_engine_runs() {
+    let (_engine_dir, engine) = fake(json!({}));
+    let (dir, workspace) = create_project();
+    let spec = |value: Value| CreateSpec::from_json(&value).unwrap();
+    let out = |path: &str| ResPath::parse(path).unwrap();
+    for (spec, destination, expected) in [
+        (
+            weapon_spec(),
+            out("res://armor/vest.tres"),
+            "does not exist; create the directory",
+        ),
+        (
+            weapon_spec(),
+            out("res://weapons/shotgun.res"),
+            "must name a .tres file",
+        ),
+        (
+            spec(json!({"script": "res://gone.gd"})),
+            shotgun(),
+            "do not exist: res://gone.gd",
+        ),
+    ] {
+        let error = resource::create(&workspace, &engine, &spec, &destination, DEFAULT_DEADLINE)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+
+    // A leftover staging file is never overwritten.
+    let leftover = dir.path().join(format!(
+        "weapons/.shotgun.gdkit-staged-{}.tres",
+        std::process::id()
+    ));
+    fs::write(&leftover, "keep me").unwrap();
+    let error = resource::create(
+        &workspace,
+        &engine,
+        &weapon_spec(),
+        &shotgun(),
+        DEFAULT_DEADLINE,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("leftover staging file"), "{error}");
+    assert_eq!(fs::read_to_string(&leftover).unwrap(), "keep me");
+    fs::remove_file(&leftover).unwrap();
+
+    // Another gdkit holding the workspace lock.
+    let lock = workspace.lock().unwrap();
+    assert!(matches!(
+        resource::create(
+            &workspace,
+            &engine,
+            &weapon_spec(),
+            &shotgun(),
+            DEFAULT_DEADLINE
+        ),
+        Err(Error::Locked(_))
+    ));
+    drop(lock);
+    assert!(invocations(&engine).is_empty());
 }
 
 fn real_engine() -> Engine {
