@@ -189,8 +189,18 @@ holding `-0.0` fails at `verify` with that explanation;
 
 ### `gdkit net` and `gdkit scene-tree` (offline)
 
-`net` → `gdview::net::analyze(declarations, scenes, autoloads)` → optional `explain`.
-`scene-tree` → `gdview::scene::{parse, expand, compact_tree}`.
+`net` is implemented: `Project::discover` → `gdview::net::analyze_project` →
+optional `explain` → human/JSON. Its loader reads sources, UID/autoload metadata
+and text scenes/resources; `scan_script` emits typed AST observations and pure
+`analyze(NetInput)` links direct scene anchors and bounded endpoint candidates.
+No engine/config lookup, workspace, import or writes. Schema 3 includes explicit
+coverage limits and unknowns; explanation filtering remaps endpoint/context indexes.
+Net reports exit 0 (including partial observations), explanation misses exit 1,
+and setup/fatal I/O errors exit 2. See [NET_SCOPE.md](NET_SCOPE.md) for acceptance
+coverage and the shared-fixture real-engine differential test.
+
+`scene-tree` remains scaffolded → `gdview::scene::{parse, expand, compact_tree}`.
+Net does not depend on the unimplemented expansion pass.
 
 ## Harness protocol
 

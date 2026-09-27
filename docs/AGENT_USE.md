@@ -250,15 +250,30 @@ cleanup exists, but process-tree cleanup is not guaranteed.
 ```sh
 gdkit net --output json
 gdkit net --explain fire_weapon
-gdkit net --offline                    # sources only, no engine
+gdkit net --explain res://scenes/arena.tscn --output json
 ```
 
 For a multiplayer project, "which RPCs exist, with what mode and transfer
 settings, who calls them, what node paths must agree on both peers, what is
 synchronized and when" cannot be reconstructed reliably by reading. `net`
-reports it as typed observations with `unknowns[]` kept explicit rather than
-guessed. `--explain` narrows to one method or node and lists every endpoint,
-call site, and synchronizer that touches it.
+reports authored source observations with `unknowns[]` kept explicit rather
+than guessed. It is always offline: no engine selection, import, cache or writes.
+`--explain` accepts a method, `receiver.method`, scene/script `res://` path, or
+authored node path; it returns associated endpoints, call sites and replication
+nodes. A miss exits 1; an observation report exits 0 even with unknowns.
+
+JSON schema 3 includes `endpoints`, `calls`, `anchors`, `contexts`, `spawners`,
+`synchronizers`, `authority_uses`, `autoloads`, `coverage`, and `unknowns`.
+`calls[].candidates` indexes that document's endpoint array (also in explanations).
+Candidates are not proof of runtime compatibility. Locations use `resource` +
+`line`; dynamic call expressions are retained verbatim. Replication `spawn` and
+`mode` are independent, and unresolved values are null.
+
+Read `coverage.limitations`: only direct authored scenes and GDScript are analyzed;
+instances/inherited endpoints, runtime state, binary resources and C# remain
+unresolved. Ordinary scene placement is not assumed to be `/root/SceneName`.
+Replication mode is reported, not intervals or visibility behavior. See
+[NET_SCOPE.md](NET_SCOPE.md) for the delivered scope and verification evidence.
 
 ## 7. `refs` and `settings`: the lookups that prevent wrong guesses
 

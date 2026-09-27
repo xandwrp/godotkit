@@ -17,7 +17,10 @@
 //! - `json_mode_writes_exactly_one_json_document_to_stdout_and_nothing_else`
 //! - `tool_errors_exit_2_with_error_prefix_on_stderr`
 //! - `check_exit_code_follows_report_outcome` (via fake-godot)
-//! - `scene_tree_and_net_need_no_engine`
+//! - `scene_tree_needs_no_engine` (scaffold)
+//! - (tests/net_cli.rs) `net_needs_no_engine_or_valid_engine_config_and_never_writes`
+//! - (tests/net_cli.rs) `net_explanation_exit_codes_and_json_references_are_consistent`
+//! - (tests/net_cli.rs) `net_empty_partial_and_invalid_projects_have_distinct_outcomes`
 //! - `refs_settings_and_autoloads_need_no_engine`
 //! - `init_writes_config_and_refuses_to_overwrite` (via fake-godot)
 //! - `init_without_godot_follows_the_global_default` (via fake-godot)

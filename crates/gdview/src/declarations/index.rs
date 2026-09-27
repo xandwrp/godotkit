@@ -7,10 +7,9 @@ use super::{
 };
 use crate::respath::ResPath;
 use crate::syntax::ast::{self, ExtendsDecl, Member, Parameter, SourceFile};
-use crate::syntax::{self, Node, Parsed};
+use crate::syntax::{Node, Parsed};
 
-pub(super) fn script(path: ResPath, source: &str) -> IndexedScript {
-    let parsed = syntax::parse(source);
+pub(super) fn script(path: ResPath, parsed: &Parsed) -> IndexedScript {
     let root = parsed.root();
     let file = SourceFile::cast(root).expect("parse always yields a SourceFile root");
     let class_name = file.class_name().and_then(|decl| {
@@ -39,7 +38,7 @@ pub(super) fn script(path: ResPath, source: &str) -> IndexedScript {
         )
     });
     IndexedScript {
-        resource_uses: resource_uses(&parsed, file),
+        resource_uses: resource_uses(parsed, file),
         node_path_uses: node_path_uses(file),
         declaration,
         parse_error,
@@ -91,10 +90,27 @@ fn class_members<'a>(
                     .collect(),
             })
             .collect();
-        let rpc = annotations.iter().find(|a| a.name == "rpc").and_then(|a| {
-            RpcConfig::from_arguments(&a.arguments.iter().map(String::as_str).collect::<Vec<_>>())
-                .ok()
+        let mut rpc_annotations = annotations.iter().filter(|a| a.name == "rpc");
+        let rpc_result = rpc_annotations.next().map(|annotation| {
+            if rpc_annotations.next().is_some() {
+                return Err("@rpc must be specified no more than once per member".into());
+            }
+            if !matches!(item, Member::Func(_)) {
+                return Err("@rpc requires a function".into());
+            }
+            RpcConfig::from_arguments(
+                &annotation
+                    .arguments
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )
         });
+        let (rpc, rpc_error) = match rpc_result {
+            Some(Ok(config)) => (Some(config), None),
+            Some(Err(error)) => (None, Some(error)),
+            None => (None, None),
+        };
         let (kind, is_static, type_text, parameters) = match item {
             Member::Signal(signal) => (
                 MemberKind::Signal,
@@ -127,6 +143,7 @@ fn class_members<'a>(
             type_text: type_text.map(str::to_owned),
             annotations,
             rpc,
+            rpc_error,
             parameters,
         });
     }

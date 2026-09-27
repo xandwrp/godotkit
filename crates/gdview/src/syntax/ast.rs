@@ -29,6 +29,8 @@ view!(EnumDecl, EnumDecl);
 view!(ClassDecl, InnerClassDecl);
 view!(Annotation, Annotation);
 view!(CallExpr, CallExpr);
+view!(FieldExpr, FieldExpr);
+view!(NameRef, NameRef);
 view!(Preload, PreloadExpr);
 
 /// Script-level annotations; they never belong to the member that follows them.
@@ -260,7 +262,29 @@ impl<'a> Annotation<'a> {
     }
 }
 
+impl<'a> FieldExpr<'a> {
+    pub fn receiver(&self) -> Option<Node<'a>> {
+        self.0.children().next()
+    }
+    pub fn name(&self) -> Option<&'a str> {
+        self.0
+            .children()
+            .nth(1)
+            .and_then(NameRef::cast)
+            .map(|n| n.text())
+    }
+}
+
+impl<'a> NameRef<'a> {
+    pub fn text(&self) -> &'a str {
+        self.0.trimmed_text()
+    }
+}
+
 impl<'a> CallExpr<'a> {
+    pub fn callee(&self) -> Option<Node<'a>> {
+        self.0.children().next()
+    }
     /// Callee source text, e.g. `self.rpc`, `multiplayer.get_unique_id`, `rpc_id`.
     pub fn callee_text(&self) -> &'a str {
         self.0
@@ -319,6 +343,21 @@ impl<'a> GetNode<'a> {
     }
 }
 
+/// A lexical binding introduced by a declaration, parameter, loop, or pattern.
+/// Consumers can conservatively avoid resolving a shadowed name without token
+/// inspection or pretending to perform control-flow analysis.
+pub fn binding_name(node: Node<'_>) -> Option<&str> {
+    match node.kind() {
+        SyntaxKind::VarDecl
+        | SyntaxKind::ConstDecl
+        | SyntaxKind::Param
+        | SyntaxKind::VarargParam
+        | SyntaxKind::ForStmt
+        | SyntaxKind::PatternBind => name_of(node),
+        _ => None,
+    }
+}
+
 /// The value of a node that is a plain string literal (`"…"`, `'…'`,
 /// `"""…"""`, `r"…"`), unescaped. `None` for anything else, including
 /// `&"…"` StringNames, `^"…"` NodePaths, and concatenations.
@@ -328,6 +367,29 @@ pub fn string_literal(node: Node<'_>) -> Option<String> {
     }
     let token = node.own_tokens().next()?;
     (token.kind() == SyntaxKind::String).then(|| string_value(token.text()))?
+}
+
+/// A String or StringName literal, decoded. Unlike `string_literal`, accepts
+/// `&"method"`; still rejects NodePaths and computed expressions.
+pub fn string_or_name_literal(node: Node<'_>) -> Option<String> {
+    if node.kind() != SyntaxKind::Literal {
+        return None;
+    }
+    let token = node.own_tokens().next()?;
+    match token.kind() {
+        SyntaxKind::String => string_value(token.text()),
+        SyntaxKind::StringName => string_value(token.text().strip_prefix('&')?),
+        _ => None,
+    }
+}
+
+/// A literal NodePath (`^"A/B"`), decoded without evaluating an expression.
+pub fn node_path_literal(node: Node<'_>) -> Option<String> {
+    if node.kind() != SyntaxKind::Literal {
+        return None;
+    }
+    let token = node.own_tokens().next()?;
+    (token.kind() == SyntaxKind::NodePath).then(|| string_value(token.text().strip_prefix('^')?))?
 }
 
 /// Unquotes and unescapes GDScript string source text. `None` if it is not a string.

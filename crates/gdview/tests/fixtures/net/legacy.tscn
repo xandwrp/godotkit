@@ -1,0 +1,12 @@
+[gd_scene load_steps=2 format=3]
+
+[sub_resource type="SceneReplicationConfig" id="Config"]
+properties/0/path = NodePath(".:position")
+properties/0/sync = false
+properties/1/path = NodePath(".:rotation")
+properties/1/watch = true
+
+[node name="Actor" type="Node2D"]
+
+[node name="Sync" type="MultiplayerSynchronizer" parent="."]
+replication_config = SubResource("Config")

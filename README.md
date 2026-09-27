@@ -24,7 +24,10 @@ Offline lookups: `refs` lists everything that references a file or directory
 which references survive a move through a uid, and names the sidecars to move.
 `settings` gives typed views of input actions (with Godot's built-in `ui_*`
 actions), layer names, window settings, the main scene, and raw keys; `autoloads`
-lists autoloads in initialization order.
+lists autoloads in initialization order. `net` maps source RPCs, candidate receivers,
+authority uses and authored replication nodes, with `--explain`, deterministic
+JSON and explicit coverage limits. It is entirely offline and read-only; source
+candidates do not prove runtime compatibility. See [net scope and tests](docs/NET_SCOPE.md).
 
 Exit codes: `0` passed, `1` failed or incomplete (including check-phase timeouts),
 `2` tool/startup, engine-probe, or configuration errors. A baseline permits engine

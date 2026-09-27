@@ -323,5 +323,206 @@ fn by_class_name_detects_duplicate_declarations() {
 #[test]
 fn rpc_config_rejects_unknown_arguments() {
     assert!(RpcConfig::from_arguments(&["\"any_peer\"", "\"sometimes\""]).is_err());
-    assert!(RpcConfig::from_arguments(&["any_peer", "unreliable_ordered", "1"]).is_ok());
+    assert!(RpcConfig::from_arguments(&["\"any_peer\"", "\"unreliable_ordered\""]).is_ok());
+}
+
+// Differential cases checked against Godot 4.7.2; see docs/NET_RESEARCH.md.
+#[test]
+fn rpc_config_enforces_categories_and_channel_position() {
+    for args in [
+        vec!["\"authority\"", "\"any_peer\""],
+        vec!["\"any_peer\"", "\"any_peer\""],
+        vec!["\"call_local\"", "\"call_remote\""],
+        vec!["\"call_local\"", "\"call_local\""],
+        vec!["\"reliable\"", "\"unreliable\""],
+        vec!["\"unreliable_ordered\"", "\"unreliable_ordered\""],
+        vec!["2"],
+        vec!["2", "\"reliable\""],
+        vec!["\"reliable\"", "2"],
+        vec!["\"any_peer\"", "\"unreliable_ordered\"", "1"],
+        vec!["\"any_peer\"", "\"call_local\"", "\"reliable\"", "\"3\""],
+        vec!["\"any_peer\"", "\"call_local\"", "\"reliable\"", "3", "4"],
+    ] {
+        assert!(RpcConfig::from_arguments(&args).is_err(), "{args:?}");
+    }
+    for args in [
+        ["\"any_peer\"", "\"call_local\"", "\"reliable\""],
+        ["\"any_peer\"", "\"reliable\"", "\"call_local\""],
+        ["\"call_local\"", "\"any_peer\"", "\"reliable\""],
+        ["\"call_local\"", "\"reliable\"", "\"any_peer\""],
+        ["\"reliable\"", "\"any_peer\"", "\"call_local\""],
+        ["\"reliable\"", "\"call_local\"", "\"any_peer\""],
+    ] {
+        assert_eq!(
+            RpcConfig::from_arguments(&args).unwrap(),
+            RpcConfig {
+                mode: RpcMode::AnyPeer,
+                call_local: true,
+                transfer: TransferMode::Reliable,
+                channel: 0,
+            }
+        );
+    }
+    let defaults = RpcConfig {
+        mode: RpcMode::Authority,
+        call_local: false,
+        transfer: TransferMode::Unreliable,
+        channel: 0,
+    };
+    assert_eq!(RpcConfig::from_arguments(&[]).unwrap(), defaults);
+    assert_eq!(
+        RpcConfig::from_arguments(&["\"unreliable_ordered\""]).unwrap(),
+        RpcConfig {
+            transfer: TransferMode::UnreliableOrdered,
+            ..defaults
+        }
+    );
+}
+
+#[test]
+fn rpc_config_preserves_signed_channels_and_decodes_string_literals() {
+    for literal in [
+        "\"any_peer\"",
+        "'any_peer'",
+        "r\"any_peer\"",
+        "&\"any_peer\"",
+        "\"any_\\u0070eer\"",
+        "\"\"\"any_peer\"\"\"",
+    ] {
+        assert_eq!(
+            RpcConfig::from_arguments(&[literal]).unwrap().mode,
+            RpcMode::AnyPeer
+        );
+    }
+    for (text, channel) in [
+        ("0", 0),
+        ("+2", 2),
+        (" -1 ", -1),
+        ("9223372036854775807", i64::MAX),
+        ("-9223372036854775808", i64::MIN),
+    ] {
+        assert_eq!(
+            RpcConfig::from_arguments(&[
+                "\"authority\"",
+                "\"call_remote\"",
+                "\"unreliable\"",
+                text
+            ])
+            .unwrap()
+            .channel,
+            channel
+        );
+    }
+    for malformed in [
+        "\"any_peer'",
+        "\"any_peer\" junk",
+        "\"any_peer\"; var other = 1",
+    ] {
+        assert!(
+            RpcConfig::from_arguments(&[malformed]).is_err(),
+            "{malformed}"
+        );
+    }
+}
+
+#[test]
+fn rpc_config_keeps_unresolved_expressions_explicit() {
+    // Several of these ARE accepted by Godot when constant. The source index
+    // must preserve its inability to evaluate them, not invent a default config.
+    for expression in ["MODE", "any_peer", "\"any_\" + \"peer\""] {
+        let error = RpcConfig::from_arguments(&[expression]).unwrap_err();
+        assert!(error.contains("cannot resolve"), "{error}");
+    }
+    for expression in [
+        "CHANNEL",
+        "1 + 2",
+        "2.5",
+        "0x10",
+        "1_000",
+        "9223372036854775808",
+    ] {
+        let error = RpcConfig::from_arguments(&[
+            "\"any_peer\"",
+            "\"call_remote\"",
+            "\"reliable\"",
+            expression,
+        ])
+        .unwrap_err();
+        assert!(error.contains("cannot resolve @rpc channel"), "{error}");
+    }
+}
+
+#[test]
+fn rpc_annotation_errors_survive_indexing_including_inner_classes() {
+    let source = r#"extends Node
+@rpc("authority", "any_peer")
+func invalid(): pass
+@rpc(MODE)
+func unresolved(): pass
+@rpc("any_peer", "call_remote", "reliable", -1)
+func valid(): pass
+func plain(): pass
+class Inner extends Node:
+    @rpc("reliable", 2)
+    func invalid_inner(): pass
+    @rpc
+    func valid_inner(): pass
+@rpc
+@rpc
+func repeated(): pass
+@rpc
+var not_a_function = 0
+"#;
+    let indexed = index_script(res("res://rpc.gd"), source);
+    assert_eq!(indexed.parse_error, None, "syntactically valid source");
+    let decl = indexed.declaration;
+    let invalid = &decl.members[0];
+    assert!(invalid.rpc.is_none());
+    assert!(invalid.rpc_error.as_deref().unwrap().contains("permission"));
+    assert_eq!(
+        invalid.annotations[0].arguments,
+        ["\"authority\"", "\"any_peer\""]
+    );
+    assert_eq!(invalid.line, 3);
+    let unresolved = &decl.members[1];
+    assert!(unresolved.rpc.is_none());
+    assert!(
+        unresolved
+            .rpc_error
+            .as_deref()
+            .unwrap()
+            .contains("cannot resolve")
+    );
+    assert_eq!(decl.members[2].rpc.as_ref().unwrap().channel, -1);
+    assert!(decl.members[2].rpc_error.is_none());
+    assert!(decl.members[3].rpc.is_none());
+    assert!(decl.members[3].rpc_error.is_none());
+    let inner = &decl.inner_classes[0];
+    assert_eq!(inner.qualified_name, "Inner");
+    assert!(inner.members[0].rpc_error.is_some());
+    assert!(inner.members[0].rpc.is_none());
+    assert_eq!(inner.members[1].rpc.as_ref().unwrap().channel, 0);
+    assert!(inner.members[1].rpc_error.is_none());
+    assert!(
+        decl.members[4]
+            .rpc_error
+            .as_deref()
+            .unwrap()
+            .contains("once per member")
+    );
+    assert!(decl.members[4].rpc.is_none());
+    assert!(
+        decl.members[5]
+            .rpc_error
+            .as_deref()
+            .unwrap()
+            .contains("requires a function")
+    );
+    assert!(decl.members[5].rpc.is_none());
+
+    let json = serde_json::to_value(&decl).unwrap();
+    assert!(json["members"][0]["rpc_error"].is_string());
+    assert_eq!(json["members"][0]["rpc"], serde_json::Value::Null);
+    assert_eq!(json["members"][2]["rpc"]["channel"], -1);
+    assert!(json["members"][2].get("rpc_error").is_none());
 }

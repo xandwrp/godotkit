@@ -1,0 +1,173 @@
+{
+  "schema_version": 3,
+  "coverage": {
+    "scripts_scanned": 1,
+    "scenes_scanned": 2,
+    "resources_scanned": 0,
+    "limitations": [
+      "Source observations only: candidates do not prove runtime RPC compatibility, delivery, authority or peer path equality.",
+      "Direct authored scene nodes only; scene instances, inherited scenes/scripts, runtime node creation and script/RPC configuration are not expanded.",
+      "GDScript and text scenes/resources only; C#, binary resources and GDExtension behavior are not inspected.",
+      "External replication config types use authored ext_resource hints; resource header types and setter order are not retained by the shared parser.",
+      "Replication reports spawn and mode, not synchronization intervals or visibility filters. Scene placement and observed context activation remain runtime-dependent."
+    ]
+  },
+  "endpoints": [
+    {
+      "script": "res://actor.gd",
+      "class": null,
+      "method": "fire",
+      "config": {
+        "mode": "any_peer",
+        "call_local": true,
+        "transfer": "reliable",
+        "channel": 3
+      },
+      "location": {
+        "resource": "res://actor.gd",
+        "line": 8
+      }
+    },
+    {
+      "script": "res://actor.gd",
+      "class": null,
+      "method": "ping",
+      "config": {
+        "mode": "authority",
+        "call_local": false,
+        "transfer": "unreliable",
+        "channel": 0
+      },
+      "location": {
+        "resource": "res://actor.gd",
+        "line": 4
+      }
+    }
+  ],
+  "calls": [
+    {
+      "location": {
+        "resource": "res://actor.gd",
+        "line": 12
+      },
+      "class": null,
+      "form": "callable_rpc",
+      "expression": "ping.rpc()",
+      "receiver": null,
+      "receiver_is_local": false,
+      "method": "ping",
+      "target_peer": null,
+      "candidates": [
+        1
+      ]
+    },
+    {
+      "location": {
+        "resource": "res://actor.gd",
+        "line": 13
+      },
+      "class": null,
+      "form": "rpc_id",
+      "expression": "rpc_id(1, &\"fire\")",
+      "receiver": null,
+      "receiver_is_local": false,
+      "method": "fire",
+      "target_peer": "1",
+      "candidates": [
+        0
+      ]
+    },
+    {
+      "location": {
+        "resource": "res://actor.gd",
+        "line": 14
+      },
+      "class": null,
+      "form": "callable_rpc",
+      "expression": "Callable(self, \"fire\").rpc_id(1)",
+      "receiver": "self",
+      "receiver_is_local": false,
+      "method": "fire",
+      "target_peer": "1",
+      "candidates": [
+        0
+      ]
+    },
+    {
+      "location": {
+        "resource": "res://actor.gd",
+        "line": 15
+      },
+      "class": null,
+      "form": "multiplayer_rpc",
+      "expression": "multiplayer.rpc(1, self, &\"ping\")",
+      "receiver": "self",
+      "receiver_is_local": false,
+      "method": "ping",
+      "target_peer": "1",
+      "candidates": [
+        1
+      ]
+    }
+  ],
+  "anchors": [
+    {
+      "script": "res://actor.gd",
+      "scene": "res://replication.tscn",
+      "node": ".",
+      "runtime_path": null,
+      "context_candidates": []
+    }
+  ],
+  "contexts": [],
+  "spawners": [
+    {
+      "scene": "res://replication.tscn",
+      "node": "Spawner",
+      "spawn_path": "",
+      "auto_spawn_list": [],
+      "line": 19
+    }
+  ],
+  "synchronizers": [
+    {
+      "scene": "res://legacy.tscn",
+      "node": "Sync",
+      "root_path": "..",
+      "properties": [
+        {
+          "path": ".:position",
+          "spawn": true,
+          "mode": "never"
+        },
+        {
+          "path": ".:rotation",
+          "spawn": true,
+          "mode": "on_change"
+        }
+      ],
+      "line": 11
+    },
+    {
+      "scene": "res://replication.tscn",
+      "node": "Sync",
+      "root_path": "..",
+      "properties": [
+        {
+          "path": ".:position",
+          "spawn": true,
+          "mode": "always"
+        },
+        {
+          "path": ".:rotation",
+          "spawn": false,
+          "mode": "on_change"
+        }
+      ],
+      "line": 16
+    }
+  ],
+  "authority_uses": [],
+  "autoloads": [],
+  "unknowns": []
+}
