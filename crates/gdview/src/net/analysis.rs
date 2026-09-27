@@ -55,7 +55,38 @@ pub fn analyze(input: &NetInput<'_>) -> NetReport {
         .sort_by(|a, b| (&a.scene, &a.node, a.line).cmp(&(&b.scene, &b.node, b.line)));
     for index in 0..report.calls.len() {
         let mut call = report.calls[index].clone();
-        let targets = targets(input, &report, &call);
+        let mut targets = targets(input, &report, &call);
+        if let Some(member) = call.facts.member.take() {
+            if targets.is_empty() {
+                unknown(
+                    &mut report.unknowns,
+                    &call.location.path,
+                    call.location.line,
+                    format!(
+                        "callable member {member} is unverified: its receiver did not resolve, and it may be a property"
+                    ),
+                );
+            } else if !targets.iter().any(|(script, class)| {
+                input.scripts.iter().any(|s| {
+                    &s.script == script && s.functions.contains(&(class.clone(), member.clone()))
+                })
+            }) {
+                // Not a declared function of the resolved node: the Callable reading
+                // is wrong, and a property's Node or Callable is not resolved here.
+                unknown(
+                    &mut report.unknowns,
+                    &call.location.path,
+                    call.location.line,
+                    format!(
+                        "{member} is not a function of the resolved receiver; it may be a Node- or Callable-valued property"
+                    ),
+                );
+                call.form = CallForm::AmbiguousRpc;
+                call.method = None;
+                call.receiver = call.receiver.map(|r| format!("{r}.{member}"));
+                targets.clear();
+            }
+        }
         if targets.len() > 1 {
             unknown(
                 &mut report.unknowns,
@@ -66,7 +97,7 @@ pub fn analyze(input: &NetInput<'_>) -> NetReport {
         }
         if call.form == CallForm::AmbiguousRpc
             && !targets.is_empty()
-            && let Some((form, method)) = source::node_call_method(&call.expression)
+            && let Some((form, method)) = call.facts.node_reading.clone()
         {
             call.form = form;
             call.method = method;
@@ -93,6 +124,15 @@ pub fn analyze(input: &NetInput<'_>) -> NetReport {
         }
         report.calls[index] = call;
     }
+    report.unknowns.retain(|u| {
+        let Some(at) = &u.location else { return true };
+        let mut on_line = report.calls.iter().filter(|c| &c.location == at);
+        match u.message.as_str() {
+            AMBIGUOUS_RECEIVER => on_line.any(|c| c.form == CallForm::AmbiguousRpc),
+            DYNAMIC_METHOD => on_line.any(|c| c.method.is_none()),
+            _ => true,
+        }
+    });
     for autoload in input.autoloads {
         let networked = autoload.path.as_ref().is_some_and(|path| {
             let scripts: BTreeSet<_> = report
@@ -287,20 +327,20 @@ fn targets(
     if call.receiver_is_local {
         return targets;
     }
-    let mut node_path = source::receiver_path(receiver);
+    let mut node_path = call.facts.receiver_path.clone();
     if node_path.is_none()
         && let (Some(script), Some(name)) = (
             input
                 .scripts
                 .iter()
                 .find(|s| s.script == call.location.path),
-            source::receiver_name(receiver),
+            &call.facts.receiver_name,
         )
     {
         node_path = script
             .bindings
             .iter()
-            .find(|b| b.class == call.class && b.name == name)
+            .find(|b| b.class == call.class && &b.name == name)
             .map(|b| b.path.0.clone());
     }
     // A field alias takes precedence over a same-named global autoload.

@@ -24,6 +24,7 @@ use crate::respath::{NodePath, ResPath};
 use crate::scene::SceneFile;
 use crate::uid::UidMap;
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 mod analysis;
 mod explanation;
@@ -97,6 +98,23 @@ pub struct RpcCall {
     /// Source candidates, NOT proof of runtime compatibility. Indexes into the
     /// enclosing report's endpoints (remapped for Explanation).
     pub candidates: Vec<usize>,
+    /// Recorded from the AST at scan time so linking never re-parses source text.
+    #[serde(skip)]
+    facts: CallFacts,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CallFacts {
+    /// The receiver as a literal node path (`$A`, `get_node("A")`), if it is one.
+    receiver_path: Option<String>,
+    /// The receiver as a bare or `self.` member name, for @onready alias lookup.
+    receiver_name: Option<String>,
+    /// For `AmbiguousRpc`: the Node.rpc/rpc_id reading, applied once the receiver
+    /// resolves to an authored node.
+    node_reading: Option<(CallForm, Option<String>)>,
+    /// `<node>.<member>.rpc()` read as a Callable: `member` must still be checked
+    /// against the resolved target, since it may be a Node-valued property.
+    member: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -195,6 +213,9 @@ pub struct ScriptObservations {
     pub unknowns: Vec<Unknown>,
     /// Direct @onready node aliases only, not a dataflow claim.
     pub bindings: Vec<NodeBinding>,
+    /// Every declared function by (qualified inner class, name), RPC or not.
+    #[serde(skip)]
+    functions: BTreeSet<(Option<String>, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -229,6 +250,12 @@ pub struct Explanation {
     pub unknowns: Vec<Unknown>,
     pub notes: Vec<String>,
 }
+
+/// Scan-time call unknowns that linking can settle; `analyze` withdraws them
+/// once no call on that line still matches.
+const AMBIGUOUS_RECEIVER: &str =
+    "RPC-like call has an unproven receiver type (Node, Callable, or custom method)";
+const DYNAMIC_METHOD: &str = "RPC method is dynamic, missing, or receiver-dependent";
 
 fn unknown(unknowns: &mut Vec<Unknown>, path: &ResPath, line: usize, message: impl Into<String>) {
     unknowns.push(Unknown {

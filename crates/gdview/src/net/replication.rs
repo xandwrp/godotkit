@@ -203,14 +203,34 @@ fn synced_properties(
         };
         groups.entry(index).or_default().insert(field, value);
     }
+    // Godot only appends `properties/N/path` when N equals the count so far and
+    // the path names a property, so a gap or rejected path drops every later
+    // entry too. Assumes Godot's own index order; setter order is not retained.
     let mut result = vec![];
     for (index, fields) in groups {
-        let Some(property_path) = fields.get("path").and_then(|v| value_path(v)) else {
+        if index != result.len() {
             unknown(
                 unknowns,
                 path,
                 line,
-                format!("replication property {index} has no valid NodePath"),
+                format!(
+                    "replication property {index} follows a gap or rejected entry; Godot drops it"
+                ),
+            );
+            continue;
+        }
+        let Some(property_path) = fields
+            .get("path")
+            .and_then(|v| value_path(v))
+            .filter(|p| p.0.split_once(':').is_some_and(|(_, sub)| !sub.is_empty()))
+        else {
+            unknown(
+                unknowns,
+                path,
+                line,
+                format!(
+                    "replication property {index} has no NodePath with a property subname; Godot drops it"
+                ),
             );
             continue;
         };

@@ -183,3 +183,131 @@ fn onready_fields_take_precedence_over_same_named_singletons() {
         );
     }
 }
+
+const PLAYER_SCENE: &str = r#"[gd_scene format=3]
+[ext_resource type="Script" path="res://main.gd" id="1"]
+[ext_resource type="Script" path="res://player.gd" id="2"]
+[node name="Main" type="Node"]
+script = ExtResource("1")
+[node name="Player" type="Node" parent="."]
+script = ExtResource("2")
+"#;
+const PLAYER: &str = "extends Node\nvar weapon\n@rpc\nfunc fire(): pass\n@rpc\nfunc hit(): pass\nfunc check():\n    is_multiplayer_authority()\n";
+
+#[test]
+fn node_members_are_callables_only_when_the_target_declares_the_function() {
+    let main = "extends Node\nfunc send():\n    $Player.weapon.rpc(\"fire\")\n    $Player.fire.rpc()\n    $Missing.fire.rpc()\n";
+    let dir = project(&[
+        ("main.gd", main),
+        ("player.gd", PLAYER),
+        ("main.tscn", PLAYER_SCENE),
+    ]);
+    let r = analyze(&dir);
+    let at = |line| r.calls.iter().find(|c| c.location.line == line).unwrap();
+    let property = at(3);
+    assert_eq!(property.form, CallForm::AmbiguousRpc, "{property:#?}");
+    assert_eq!(property.method, None);
+    assert_eq!(property.receiver.as_deref(), Some("$Player.weapon"));
+    assert!(property.candidates.is_empty());
+    let method = at(4);
+    assert_eq!(method.form, CallForm::CallableRpc);
+    assert_eq!(method.candidates.len(), 1);
+    assert_eq!(r.endpoints[method.candidates[0]].method, "fire");
+    let messages = |line| {
+        r.unknowns
+            .iter()
+            .filter(move |u| u.location.as_ref().unwrap().line == line)
+            .map(|u| u.message.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        messages(3)
+            .iter()
+            .any(|m| m.contains("weapon is not a function"))
+    );
+    assert!(messages(5).iter().any(|m| m.contains("fire is unverified")));
+}
+
+#[test]
+fn linking_withdraws_scan_unknowns_only_for_calls_it_resolved() {
+    let main = "extends Node\n@onready var player = $Player\nfunc send():\n    player.rpc(\"hit\")\n    player.rpc(\"hit\"); mystery.rpc(\"hit\")\n";
+    let dir = project(&[
+        ("main.gd", main),
+        ("player.gd", PLAYER),
+        ("main.tscn", PLAYER_SCENE),
+    ]);
+    let r = analyze(&dir);
+    let resolved = r.calls.iter().find(|c| c.location.line == 4).unwrap();
+    assert_eq!(resolved.form, CallForm::Rpc);
+    assert_eq!(resolved.candidates.len(), 1);
+    let on = |line| {
+        r.unknowns
+            .iter()
+            .filter(|u| u.location.as_ref().unwrap().line == line)
+            .count()
+    };
+    assert_eq!(on(4), 0, "{:#?}", r.unknowns);
+    // `mystery` on the same line is still ambiguous, so its unknowns stay.
+    assert!(
+        r.unknowns
+            .iter()
+            .any(|u| u.location.as_ref().unwrap().line == 5
+                && u.message.contains("unproven receiver"))
+    );
+}
+
+#[test]
+fn explaining_a_node_includes_its_scripts_authority_uses() {
+    let dir = project(&[
+        ("main.gd", "extends Node\n"),
+        ("player.gd", PLAYER),
+        ("main.tscn", PLAYER_SCENE),
+    ]);
+    let r = analyze(&dir);
+    let by_node = net::explain(&r, "Player");
+    let by_script = net::explain(&r, "res://player.gd");
+    assert_eq!(by_node.authority_uses.len(), 1);
+    assert_eq!(by_node.authority_uses, by_script.authority_uses);
+}
+
+#[test]
+fn replication_entries_after_a_gap_or_rejected_path_are_dropped() {
+    let config = |entries: &str| {
+        format!(
+            "[gd_scene format=3]\n[sub_resource type=\"SceneReplicationConfig\" id=\"c\"]\n{entries}[node name=\"Root\" type=\"Node\"]\n[node name=\"Sync\" type=\"MultiplayerSynchronizer\" parent=\".\"]\nreplication_config = SubResource(\"c\")\n"
+        )
+    };
+    let paths = |entries: &str| {
+        let dir = project(&[("main.tscn", &config(entries))]);
+        let r = analyze(&dir);
+        let paths: Vec<_> = r.synchronizers[0]
+            .properties
+            .iter()
+            .map(|p| p.path.0.clone())
+            .collect();
+        (paths, r.unknowns)
+    };
+    // Eleven entries: numeric, not lexicographic, index order.
+    let eleven: String = (0..11)
+        .map(|i| format!("properties/{i}/path = NodePath(\".:p{i}\")\n"))
+        .collect();
+    let (all, unknowns) = paths(&eleven);
+    assert_eq!(all.len(), 11);
+    assert_eq!(all[2], ".:p2");
+    assert_eq!(all[10], ".:p10");
+    assert!(unknowns.is_empty(), "{unknowns:#?}");
+    // Engine-verified (Godot 4.7.2): both drop the entry and everything after it.
+    let (gap, unknowns) = paths(
+        "properties/0/path = NodePath(\".:position\")\nproperties/2/path = NodePath(\".:rotation\")\n",
+    );
+    assert_eq!(gap, [".:position"]);
+    assert!(unknowns.iter().any(|u| u.message.contains("follows a gap")));
+    let (no_subname, unknowns) =
+        paths("properties/0/path = NodePath(\".\")\nproperties/1/path = NodePath(\".:scale\")\n");
+    assert!(no_subname.is_empty());
+    assert!(
+        unknowns
+            .iter()
+            .any(|u| u.message.contains("property subname"))
+    );
+}

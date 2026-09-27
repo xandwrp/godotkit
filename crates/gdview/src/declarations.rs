@@ -153,7 +153,12 @@ pub enum TransferMode {
 /// Indexes one script from source. Never fails: an unparseable script yields a
 /// declaration with `parse_error` set and whatever members were recovered.
 pub fn index_script(path: ResPath, source: &str) -> IndexedScript {
-    index::script(path, source)
+    index_parsed(path, &crate::syntax::parse(source))
+}
+
+/// `index_script` for a caller that already holds the parse, so it is not repeated.
+pub fn index_parsed(path: ResPath, parsed: &crate::syntax::Parsed) -> IndexedScript {
+    index::script(path, parsed)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

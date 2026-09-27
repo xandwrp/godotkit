@@ -72,11 +72,10 @@ impl RpcConfig {
     }
 }
 
-/// Use the existing GDScript string decoder, not quote trimming. StringName
-/// literals use the same string contents, and Godot accepts them here as well.
+/// Decode with the shared literal decoder, not quote trimming. Godot accepts
+/// StringName literals here as well.
 fn string_argument(argument: &str) -> Option<String> {
     let text = argument.trim();
-    let text = text.strip_prefix('&').unwrap_or(text);
     let parsed = syntax::parse(&format!("const __rpc_argument = {text}\n"));
     if !parsed.is_valid() {
         return None;
@@ -94,5 +93,5 @@ fn string_argument(argument: &str) -> Option<String> {
     if value.trimmed_text() != text {
         return None;
     }
-    ast::string_literal(value)
+    ast::string_or_name_literal(value)
 }

@@ -66,8 +66,10 @@ pub fn explain(report: &NetReport, query: &str) -> Explanation {
                 && qualified.is_none_or(|(receiver, _)| {
                     c.receiver.as_deref().is_some_and(|r| {
                         r == receiver
-                            || source::receiver_path(r)
-                                .is_some_and(|path| node_label(&path, receiver))
+                            || c.facts
+                                .receiver_path
+                                .as_deref()
+                                .is_some_and(|path| node_label(path, receiver))
                     })
                 })
         })
@@ -174,8 +176,7 @@ pub fn explain(report: &NetReport, query: &str) -> Explanation {
         .authority_uses
         .iter()
         .filter(|a| {
-            a.location.path.as_str() == query
-                || (resource_query && selected_scripts.contains(&a.location.path))
+            a.location.path.as_str() == query || selected_scripts.contains(&a.location.path)
         })
         .cloned()
         .collect();
@@ -199,7 +200,7 @@ pub fn explain(report: &NetReport, query: &str) -> Explanation {
             u.location.as_ref().is_some_and(|l| {
                 locations.contains(l)
                     || l.path.as_str() == query
-                    || (resource_query && selected_scripts.contains(&l.path))
+                    || selected_scripts.contains(&l.path)
             })
         })
         .cloned()

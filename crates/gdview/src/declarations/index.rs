@@ -7,10 +7,9 @@ use super::{
 };
 use crate::respath::ResPath;
 use crate::syntax::ast::{self, ExtendsDecl, Member, Parameter, SourceFile};
-use crate::syntax::{self, Node, Parsed};
+use crate::syntax::{Node, Parsed};
 
-pub(super) fn script(path: ResPath, source: &str) -> IndexedScript {
-    let parsed = syntax::parse(source);
+pub(super) fn script(path: ResPath, parsed: &Parsed) -> IndexedScript {
     let root = parsed.root();
     let file = SourceFile::cast(root).expect("parse always yields a SourceFile root");
     let class_name = file.class_name().and_then(|decl| {
@@ -39,7 +38,7 @@ pub(super) fn script(path: ResPath, source: &str) -> IndexedScript {
         )
     });
     IndexedScript {
-        resource_uses: resource_uses(&parsed, file),
+        resource_uses: resource_uses(parsed, file),
         node_path_uses: node_path_uses(file),
         declaration,
         parse_error,

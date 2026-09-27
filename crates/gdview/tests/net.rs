@@ -133,11 +133,11 @@ func test():
 
 const REPLICATION: &str = r#"[gd_scene format=3]
 [sub_resource type="SceneReplicationConfig" id="Config"]
-properties/10/path = NodePath(".:health")
-properties/10/spawn = false
-properties/10/replication_mode = 2
-properties/2/path = NodePath(".:position")
-properties/2/replication_mode = 1
+properties/1/path = NodePath(".:health")
+properties/1/spawn = false
+properties/1/replication_mode = 2
+properties/0/path = NodePath(".:position")
+properties/0/replication_mode = 1
 [node name="Root" type="Node"]
 [node name="Spawner" type="MultiplayerSpawner" parent="."]
 spawn_path = NodePath("..")
@@ -166,12 +166,12 @@ fn finds_spawners_and_synchronizers_with_replication_config_properties() {
 #[test]
 fn old_format_replication_configs_respect_sync_false() {
     let scene = REPLICATION.replace(
-        "properties/2/replication_mode = 1",
-        "properties/2/sync = false",
+        "properties/0/replication_mode = 1",
+        "properties/0/sync = false",
     );
     let r = report(&[], &[("res://main.tscn", &scene)], &[]);
     assert_eq!(r.synchronizers[0].properties[0].mode, Some(SyncMode::Never));
-    let scene = scene.replace("properties/2/sync = false", "properties/2/watch = true");
+    let scene = scene.replace("properties/0/sync = false", "properties/0/watch = true");
     let r = report(&[], &[("res://main.tscn", &scene)], &[]);
     assert_eq!(
         r.synchronizers[0].properties[0].mode,
@@ -179,8 +179,8 @@ fn old_format_replication_configs_respect_sync_false() {
     );
     // The shared parser loses assignment order. Never invent a precedence rule.
     let scene = scene.replace(
-        "properties/2/watch = true",
-        "properties/2/watch = true\nproperties/2/sync = true",
+        "properties/0/watch = true",
+        "properties/0/watch = true\nproperties/0/sync = true",
     );
     let r = report(&[], &[("res://main.tscn", &scene)], &[]);
     assert_eq!(r.synchronizers[0].properties[0].mode, None);

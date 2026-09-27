@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 /// Recover observations even from damaged source. No engine, I/O, evaluation,
 /// or global method-name matching. Calls remain unlinked until `analyze`.
 pub fn scan_script(path: ResPath, source: &str) -> ScriptObservations {
-    let indexed = declarations::index_script(path.clone(), source);
     let parsed = syntax::parse(source);
+    let indexed = declarations::index_parsed(path.clone(), &parsed);
     let mut result = ScriptObservations {
         script: path.clone(),
         endpoints: vec![],
@@ -16,6 +16,7 @@ pub fn scan_script(path: ResPath, source: &str) -> ScriptObservations {
         contexts: vec![],
         unknowns: vec![],
         bindings: vec![],
+        functions: BTreeSet::new(),
     };
     if let Some(error) = indexed.parse_error {
         unknown(
@@ -56,7 +57,6 @@ pub fn scan_script(path: ResPath, source: &str) -> ScriptObservations {
         .as_ref()
         .map(|n| n.name.as_str());
     for node in parsed.root().descendants() {
-        let class = class_scope(node, outer_name);
         if let Some(var) = ast::VarDecl::cast(node)
             && enclosing_function(node).is_none()
             && ast::Member::Var(var)
@@ -68,7 +68,7 @@ pub fn scan_script(path: ResPath, source: &str) -> ScriptObservations {
             )
         {
             result.bindings.push(NodeBinding {
-                class: class.clone(),
+                class: class_scope(node, outer_name),
                 name: name.into(),
                 path: NodePath(path),
             });
@@ -84,6 +84,7 @@ pub fn scan_script(path: ResPath, source: &str) -> ScriptObservations {
             .and_then(|f| f.name())
             .or_else(|| ast::NameRef::cast(callee).map(|n| n.text()));
         let Some(name) = name else { continue };
+        let class = class_scope(node, outer_name);
         let receiver = field.and_then(|f| f.receiver());
         let args = call.arguments();
         let location = SourceLocation {
@@ -109,6 +110,7 @@ pub fn scan_script(path: ResPath, source: &str) -> ScriptObservations {
                     .then(|| args.first().map(|n| n.trimmed_text().to_owned()))
                     .flatten(),
                 candidates: vec![],
+                facts: receiver_facts(receiver),
             };
             if receiver.is_some_and(is_multiplayer)
                 && name == "rpc"
@@ -121,6 +123,7 @@ pub fn scan_script(path: ResPath, source: &str) -> ScriptObservations {
                     .get(1)
                     .and_then(|n| ast::NameRef::cast(*n))
                     .is_some_and(|n| blocks_global_receiver(node, n.text()));
+                observed.facts = receiver_facts(args.get(1).copied());
                 observed.method = args.get(2).copied().and_then(ast::string_or_name_literal);
                 if args.len() < 3 || args.len() > 4 {
                     unknown(
@@ -134,39 +137,35 @@ pub fn scan_script(path: ResPath, source: &str) -> ScriptObservations {
                 receiver.and_then(|r| callable_target(r, node, &class, &methods))
             {
                 observed.form = CallForm::CallableRpc;
-                observed.receiver = target.0;
+                observed.receiver = target.receiver.map(|r| r.trimmed_text().into());
                 observed.receiver_is_local = observed
                     .receiver
                     .as_deref()
                     .is_some_and(|name| blocks_global_receiver(node, name));
-                observed.method = target.1;
+                observed.facts = receiver_facts(target.receiver);
+                if target.unverified {
+                    observed.facts.member = target.method.clone();
+                }
+                observed.method = target.method;
             } else {
                 let self_receiver = receiver.is_none_or(|r| r.trimmed_text() == "self");
                 let overridden = self_receiver
                     && (methods.contains(&(class.clone(), name.into())) || shadowed(node, name));
                 let known_node = receiver.is_none_or(|r| is_node(r, node)) && !overridden;
+                let node_method = args
+                    .get(usize::from(name == "rpc_id"))
+                    .copied()
+                    .and_then(ast::string_or_name_literal);
                 if !known_node {
+                    observed.facts.node_reading = Some((observed.form, node_method));
                     observed.form = CallForm::AmbiguousRpc;
-                    unknown(
-                        &mut result.unknowns,
-                        &path,
-                        node.line(),
-                        "RPC-like call has an unproven receiver type (Node, Callable, or custom method)",
-                    );
+                    unknown(&mut result.unknowns, &path, node.line(), AMBIGUOUS_RECEIVER);
                 } else {
-                    observed.method = args
-                        .get(usize::from(name == "rpc_id"))
-                        .copied()
-                        .and_then(ast::string_or_name_literal);
+                    observed.method = node_method;
                 }
             }
             if observed.method.is_none() {
-                unknown(
-                    &mut result.unknowns,
-                    &path,
-                    node.line(),
-                    "RPC method is dynamic, missing, or receiver-dependent",
-                );
+                unknown(&mut result.unknowns, &path, node.line(), DYNAMIC_METHOD);
             }
             if name == "rpc_id" && args.is_empty() {
                 unknown(
@@ -183,7 +182,9 @@ pub fn scan_script(path: ResPath, source: &str) -> ScriptObservations {
             "get_multiplayer_authority" | "is_multiplayer_authority" | "set_multiplayer_authority"
         );
         let api_authority = matches!(name, "is_server" | "get_remote_sender_id" | "get_unique_id");
-        let overridden_authority = receiver.is_none_or(|r| r.trimmed_text() == "self")
+        // Only authority names need the (body-walking) shadowing check.
+        let overridden_authority = node_authority
+            && receiver.is_none_or(|r| r.trimmed_text() == "self")
             && (methods.contains(&(class.clone(), name.into())) || shadowed(node, name));
         if (node_authority && !overridden_authority && receiver.is_none_or(|r| is_node(r, node)))
             || (api_authority
@@ -247,6 +248,7 @@ pub fn scan_script(path: ResPath, source: &str) -> ScriptObservations {
     });
     result.unknowns.sort();
     result.unknowns.dedup();
+    result.functions = methods;
     result
 }
 
@@ -419,36 +421,55 @@ fn is_tree(receiver: Node<'_>) -> bool {
         .is_some_and(|c| is_self_call(c, "get_tree") && c.arguments().is_empty())
 }
 
-fn callable_target(
-    receiver: Node<'_>,
+struct CallableTarget<'a> {
+    /// The Callable's object; None for an implicit-self method reference.
+    receiver: Option<Node<'a>>,
+    method: Option<String>,
+    /// `<node>.<member>`: `member` may be a property, not a method, until the
+    /// node's script is resolved.
+    unverified: bool,
+}
+
+fn callable_target<'a>(
+    receiver: Node<'a>,
     at: Node<'_>,
     class: &Option<String>,
     methods: &BTreeSet<(Option<String>, String)>,
-) -> Option<(Option<String>, Option<String>)> {
+) -> Option<CallableTarget<'a>> {
     if let Some(call) = ast::CallExpr::cast(receiver)
         && call.callee_text() == "Callable"
     {
         let args = call.arguments();
         if args.len() == 2 {
-            return Some((
-                Some(args[0].trimmed_text().into()),
-                ast::string_or_name_literal(args[1]),
-            ));
+            return Some(CallableTarget {
+                receiver: Some(args[0]),
+                method: ast::string_or_name_literal(args[1]),
+                unverified: false,
+            });
         }
     }
     if let Some(name) = ast::NameRef::cast(receiver).map(|n| n.text())
         && methods.contains(&(class.clone(), name.into()))
         && !shadowed(at, name)
     {
-        return Some((None, Some(name.into())));
+        return Some(CallableTarget {
+            receiver: None,
+            method: Some(name.into()),
+            unverified: false,
+        });
     }
     if let Some(field) = ast::FieldExpr::cast(receiver) {
         let object = field.receiver()?;
         let name = field.name()?;
-        if (object.trimmed_text() == "self" && methods.contains(&(class.clone(), name.into())))
-            || (object.trimmed_text() != "self" && is_node(object, at))
+        let is_self = object.trimmed_text() == "self";
+        if (is_self && methods.contains(&(class.clone(), name.into())))
+            || (!is_self && is_node(object, at))
         {
-            return Some((Some(object.trimmed_text().into()), Some(name.into())));
+            return Some(CallableTarget {
+                receiver: Some(object),
+                method: Some(name.into()),
+                unverified: !is_self,
+            });
         }
     }
     None
@@ -475,59 +496,20 @@ fn node_path(node: Node<'_>) -> Option<String> {
     })
 }
 
-/// Decode a retained receiver expression via the same AST, never string splits.
-pub(super) fn receiver_path(expression: &str) -> Option<String> {
-    let parsed = syntax::parse(&format!("var __receiver = {expression}\n"));
-    if !parsed.is_valid() {
-        return None;
-    }
-    let file = ast::SourceFile::cast(parsed.root())?;
-    let ast::Member::Var(var) = file.members().next()? else {
-        return None;
+/// What linking needs to know about a receiver, read once from the AST.
+fn receiver_facts(receiver: Option<Node<'_>>) -> CallFacts {
+    let Some(receiver) = receiver else {
+        return CallFacts::default();
     };
-    node_path(var.initializer()?)
-}
-
-pub(super) fn receiver_name(expression: &str) -> Option<String> {
-    let parsed = syntax::parse(&format!("var __receiver = {expression}\n"));
-    if !parsed.is_valid() {
-        return None;
+    CallFacts {
+        receiver_path: node_path(receiver),
+        receiver_name: ast::NameRef::cast(receiver)
+            .map(|n| n.text().to_owned())
+            .or_else(|| {
+                let field = ast::FieldExpr::cast(receiver)?;
+                (field.receiver()?.trimmed_text() == "self")
+                    .then(|| field.name().map(str::to_owned))?
+            }),
+        ..CallFacts::default()
     }
-    let file = ast::SourceFile::cast(parsed.root())?;
-    let ast::Member::Var(var) = file.members().next()? else {
-        return None;
-    };
-    let node = var.initializer()?;
-    if let Some(name) = ast::NameRef::cast(node) {
-        return Some(name.text().into());
-    }
-    let field = ast::FieldExpr::cast(node)?;
-    (field.receiver()?.trimmed_text() == "self").then(|| field.name().map(str::to_owned))?
-}
-
-/// Once a receiver resolves to a scene/autoload node, disambiguate its Node RPC
-/// argument positions. Still leave nonliteral method names unresolved.
-pub(super) fn node_call_method(expression: &str) -> Option<(CallForm, Option<String>)> {
-    let parsed = syntax::parse(&format!("var __call = {expression}\n"));
-    if !parsed.is_valid() {
-        return None;
-    }
-    let file = ast::SourceFile::cast(parsed.root())?;
-    let ast::Member::Var(var) = file.members().next()? else {
-        return None;
-    };
-    let call = ast::CallExpr::cast(var.initializer()?)?;
-    let name = ast::FieldExpr::cast(call.callee()?)?.name()?;
-    let index = usize::from(name == "rpc_id");
-    Some((
-        if index == 1 {
-            CallForm::RpcId
-        } else {
-            CallForm::Rpc
-        },
-        call.arguments()
-            .get(index)
-            .copied()
-            .and_then(ast::string_or_name_literal),
-    ))
 }
